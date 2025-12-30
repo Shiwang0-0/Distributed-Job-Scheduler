@@ -19,6 +19,8 @@ func main() {
 	apiGateway := gateway.NewAPIGateway(lb)
 
 	http.HandleFunc("/api/jobs", apiGateway.HandleCreateJob)
+	http.HandleFunc("/jobs", apiGateway.HandleGetJobs)
+	http.HandleFunc("/job", apiGateway.HandleGetJobById)
 
 	port := ":8080"
 	log.Println("API Gateway running on", port)

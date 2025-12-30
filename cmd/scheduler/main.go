@@ -34,6 +34,8 @@ func main() {
 
 	http.HandleFunc("/health", scheduler.HandleHealth)
 	http.HandleFunc("/schedule", scheduler.HandleSchedule)
+	http.HandleFunc("/jobs", scheduler.HandleGetJobs)
+	http.HandleFunc("/job", scheduler.HandleGetJobById)
 
 	log.Println("Scheduler running on port", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))

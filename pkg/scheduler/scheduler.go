@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -113,7 +114,7 @@ func (s *Scheduler) HandleSchedule(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Scheduler:%s wrote to DB: %s (status: pending)", s.port, job.JobId)
 
 	res := gateway.JobResponse{
-		JobId:   job.JobId,
+		JobId:   job.JobId.Hex(),
 		Status:  "pending",
 		Message: fmt.Sprintf("Job scheduled successfully on %s. Watcher will process it.", s.instanceId),
 	}
@@ -121,4 +122,74 @@ func (s *Scheduler) HandleSchedule(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(res)
+}
+
+func (s *Scheduler) HandleGetJobs(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	collection := s.db.Collection("jobs")
+
+	// search for specific status job
+	// ?status="pending"
+	status := r.URL.Query().Get("status")
+
+	filter := bson.M{}
+	if status != "" {
+		filter["status"] = status
+	}
+
+	// find returns a pointer to the matched document
+	// sorting the collection by created at (the most recent one at first)
+	ptr, err := collection.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer ptr.Close(ctx)
+
+	// decode bson
+	var jobs []gateway.Job
+	for ptr.Next(ctx) {
+		var job gateway.Job
+		if err := ptr.Decode(&job); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		fmt.Println(job) // or append to a slice
+		jobs = append(jobs, job)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(jobs)
+}
+
+func (s *Scheduler) HandleGetJobById(w http.ResponseWriter, r *http.Request) {
+	jobIDStr := r.URL.Query().Get("job_id")
+	if jobIDStr == "" {
+		http.Error(w, "job_id parameter required", http.StatusBadRequest)
+		return
+	}
+
+	// mongoDb object
+	objID, err := primitive.ObjectIDFromHex(jobIDStr)
+	if err != nil {
+		http.Error(w, "invalid job_id format", http.StatusBadRequest)
+		return
+	}
+
+	ctx := context.Background()
+	collection := s.db.Collection("jobs")
+
+	var job gateway.Job
+	err = collection.FindOne(ctx, bson.M{"_id": objID}).Decode(&job)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			http.Error(w, "Job not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "Failed to fetch job", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(job)
 }

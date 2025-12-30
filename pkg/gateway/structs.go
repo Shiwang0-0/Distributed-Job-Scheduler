@@ -12,7 +12,7 @@ type APIGateway struct {
 }
 
 type Job struct {
-	JobId       primitive.ObjectID `json:"job_id" bson:"job_id,omitempty"`
+	JobId       primitive.ObjectID `json:"job_id" bson:"_id,omitempty"` // bson needs to be _id only
 	ScheduledAt time.Time          `json:"scheduled_at" bson:"scheduled_at"`
 	CreatedAt   time.Time          `json:"created_at" bson:"created_at"`
 	LastRunAt   time.Time          `json:"last_run_at" bson:"last_run_at"`
@@ -33,7 +33,7 @@ type JobExecution struct {
 }
 
 type JobResponse struct {
-	JobId   primitive.ObjectID `json:"job_id" bson:"job_id"`
-	Status  string             `json:"status"`
-	Message string             `json:"message"`
+	JobId   string `json:"job_id"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
 }

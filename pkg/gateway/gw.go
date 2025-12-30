@@ -40,10 +40,56 @@ func (gw *APIGateway) HandleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 	defer res.Body.Close()
 
-	body, _ := io.ReadAll(res.Body)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(res.StatusCode)
-	w.Write(body)
+	io.Copy(w, res.Body)
 
 	log.Printf("Job routed to %s", service.Url)
+}
+
+func (gw *APIGateway) HandleGetJobs(w http.ResponseWriter, r *http.Request) {
+	service := gw.lb.GetScheduler()
+	if service == nil {
+		http.Error(w, "No healthy scheduler available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// ?status="pending"
+	url := service.Url + "/jobs" + "?" + r.URL.RawQuery
+	res, err := http.Get(url)
+	if err != nil {
+		http.Error(w, "Failed to fetch jobs", http.StatusInternalServerError)
+		return
+	}
+	defer res.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(res.StatusCode)
+	io.Copy(w, res.Body)
+}
+
+func (gw *APIGateway) HandleGetJobById(w http.ResponseWriter, r *http.Request) {
+	service := gw.lb.GetScheduler()
+	if service == nil {
+		http.Error(w, "No healthy scheduler available", http.StatusServiceUnavailable)
+		return
+	}
+
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		http.Error(w, "job_id required", http.StatusBadRequest)
+		return
+	}
+	url := service.Url + "/job?job_id=" + jobID
+
+	res, err := http.Get(url)
+	if err != nil {
+		http.Error(w, "Failed to fetch jobs", http.StatusInternalServerError)
+		return
+	}
+	defer res.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(res.StatusCode)
+	io.Copy(w, res.Body)
 }
