@@ -10,6 +10,12 @@
             "payload": "test job"
         }'
     ```
+- get jobs  (gateway takes this request)
+    ```  
+    curl "http://localhost:8080/jobs"   
+    curl "http://localhost:8080/jobs?status=pending"  
+    curl "http://localhost:8080/job?job_id=69541618f7d4e1295bfa447b"  
+    ```
 
 
 ```
@@ -64,4 +70,19 @@
                   │ - jobs          │
                   │ - job_executions│
                   └─────────────────┘
+```
+
+```
+    Client ----GET /jobs?status=pending----> Gateway
+                                                |
+                                                | Forward to a healthy scheduler
+                                                v
+                                    Scheduler.HandleGetJobs
+                                                |
+                                                | Query MongoDB jobs collection
+                                                v
+                                    Return JSON jobs list
+                                                ^
+                                                |
+    Client <------ Gateway returns JSON <-------- Scheduler
 ```
