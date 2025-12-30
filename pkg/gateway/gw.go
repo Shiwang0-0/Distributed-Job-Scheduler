@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"distributed-job-scheduler/pkg/loadbalancer"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"time"
 )
 
 func NewAPIGateway(lb *loadbalancer.LoadBalancer) *APIGateway {
@@ -25,11 +23,6 @@ func (gw *APIGateway) HandleCreateJob(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&job); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
-	}
-
-	// Generate job ID
-	if job.Id == "" {
-		job.Id = fmt.Sprintf("job_%d", time.Now().UnixNano())
 	}
 
 	service := gw.lb.GetScheduler()
@@ -52,5 +45,5 @@ func (gw *APIGateway) HandleCreateJob(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(res.StatusCode)
 	w.Write(body)
 
-	log.Printf("Job %s routed to %s", job.Id, service.Url)
+	log.Printf("Job routed to %s", service.Url)
 }

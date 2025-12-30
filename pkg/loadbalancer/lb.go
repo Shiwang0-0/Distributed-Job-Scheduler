@@ -10,11 +10,11 @@ func NewLoadBalancer(serviceURLs []string) *LoadBalancer {
 
 	// initialize the load balancer scheduler service
 	lb := &LoadBalancer{
-		Services: make([]*SchedulerService, len(serviceURLs)),
+		Services: make([]*SchedulerNode, len(serviceURLs)),
 	}
 
 	for i, url := range serviceURLs {
-		lb.Services[i] = &SchedulerService{Url: url, Healthy: true}
+		lb.Services[i] = &SchedulerNode{Url: url, Healthy: true}
 	}
 
 	// checks health asynchronously
@@ -31,7 +31,7 @@ func (lb *LoadBalancer) healthCheck() {
 	for range ticker.C {
 		for _, service := range lb.Services {
 			// for the current service start a go routine to check its health
-			go func(s *SchedulerService) {
+			go func(s *SchedulerNode) {
 				client := &http.Client{Timeout: 5 * time.Second}
 				res, err := client.Get(s.Url + "/health")
 
@@ -56,7 +56,7 @@ func (lb *LoadBalancer) healthCheck() {
 }
 
 // select a scheduler using round robin
-func (lb *LoadBalancer) GetScheduler() *SchedulerService {
+func (lb *LoadBalancer) GetScheduler() *SchedulerNode {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 

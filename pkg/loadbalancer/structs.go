@@ -2,14 +2,14 @@ package loadbalancer
 
 import "sync"
 
-type SchedulerService struct {
+type SchedulerNode struct {
 	Url     string
 	Healthy bool
 	mu      sync.RWMutex
 }
 
 type LoadBalancer struct {
-	Services []*SchedulerService
+	Services []*SchedulerNode
 	Current  int // to know which service will run next
 	mu       sync.Mutex
 }
