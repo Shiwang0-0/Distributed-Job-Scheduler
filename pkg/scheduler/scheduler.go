@@ -15,13 +15,6 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-type Scheduler struct {
-	client     *mongo.Client
-	db         *mongo.Database
-	port       string
-	instanceId string
-}
-
 func NewScheduler(mongoURI, dbName, port string) (*Scheduler, error) {
 	ctx, cancle := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancle()
@@ -91,7 +84,7 @@ func (s *Scheduler) HandleSchedule(w http.ResponseWriter, r *http.Request) {
 		job.MaxRetries = 5 // Default max retries
 	}
 
-	job.Status = "PENDING"
+	job.Status = "pending"
 	job.RetryCount = 0
 	job.CreatedAt = now
 

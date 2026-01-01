@@ -17,6 +17,10 @@ type Job struct {
 	CreatedAt   time.Time          `json:"created_at" bson:"created_at"`
 	LastRunAt   time.Time          `json:"last_run_at" bson:"last_run_at"`
 	NextRunAt   time.Time          `json:"next_run_at" bson:"next_run_at"`
+	UpdatedAt   time.Time          `json:"updated_at" bson:"updated_at"`
+	ClaimedBy   string             `bson:"claimed_by,omitempty" json:"claimed_by,omitempty"`
+	ClaimedAt   *time.Time         `bson:"claimed_at,omitempty" json:"claimed_at,omitempty"`
+	QueuedAt    time.Time          `json:"queued_at" bson:"queued_at"`
 	Status      string             `json:"status" bson:"status"`
 	Payload     string             `json:"payload" bson:"payload"`
 	RetryCount  int                `json:"retry_count" bson:"retry_count"`
