@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"bytes"
 	"context"
 	"distributed-job-scheduler/pkg/gateway"
 	"distributed-job-scheduler/pkg/queue"
@@ -34,12 +35,9 @@ func NewWatcher(mongoURI, dbName, port string) (*Watcher, error) {
 
 	db := client.Database(dbName)
 
-	queue := queue.NewQueue()
-
 	watcher := &Watcher{
 		client:    client,
 		db:        db,
-		queue:     queue,
 		port:      port,
 		watcherId: watcherID,
 		stats:     &WatcherStats{},
@@ -149,12 +147,24 @@ func (watcher *Watcher) addJobToQueue(job *gateway.Job) {
 
 	now := time.Now()
 
-	queueItem := queue.QueueItem{
+	payload := queue.QueueItem{
 		Job: *job,
 	}
-	watcher.queue.Push(queueItem)
 
-	_, err := collection.UpdateOne(
+	body, _ := json.Marshal(payload)
+
+	resp, err := http.Post(
+		"http://localhost:6000/queue/push",
+		"application/json",
+		bytes.NewReader(body),
+	)
+
+	if err != nil || resp.StatusCode != http.StatusOK {
+		log.Printf("Watcher:%s failed to push job %s", watcher.watcherId, job.JobId)
+		return
+	}
+
+	_, err = collection.UpdateOne(
 		ctx,
 		bson.M{"_id": job.JobId},
 		bson.M{"$set": bson.M{
@@ -172,22 +182,9 @@ func (watcher *Watcher) addJobToQueue(job *gateway.Job) {
 	}
 }
 
-func (watcher *Watcher) HandleGetQueue(w http.ResponseWriter, r *http.Request) {
-	watcher.queue.Mu.RLock()
-	defer watcher.queue.Mu.RUnlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"watcher_id": watcher.watcherId,
-		"queue_size": len(watcher.queue.Items),
-		"items":      watcher.queue.Items,
-	})
-}
-
 func (watcher *Watcher) HandleStats(w http.ResponseWriter, r *http.Request) {
 	stats := watcher.stats.GetStats()
 	stats["watcher_id"] = watcher.watcherId
-	stats["queue_size"] = watcher.queue.Size()
 	stats["uptime"] = time.Since(watcher.stats.LastClaimedTime).String()
 
 	w.Header().Set("Content-Type", "application/json")

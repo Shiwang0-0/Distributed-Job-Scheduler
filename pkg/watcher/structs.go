@@ -1,7 +1,6 @@
 package watcher
 
 import (
-	"distributed-job-scheduler/pkg/queue"
 	"sync"
 	"time"
 
@@ -11,7 +10,6 @@ import (
 type Watcher struct {
 	client      *mongo.Client
 	db          *mongo.Database
-	queue       *queue.Queue
 	watcherId   string
 	port        string
 	stats       *WatcherStats

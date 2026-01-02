@@ -27,7 +27,7 @@ func dbIndexes(db *mongo.Database, ctx context.Context) error {
 	}
 
 	// execution --> store the jobs that have started executing
-	executionsCollection := db.Collection("executions")
+	executionsCollection := db.Collection("job_executions")
 	executionsIndexes := []mongo.IndexModel{
 		{
 			Keys: bson.D{{Key: "started_at", Value: -1}},

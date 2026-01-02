@@ -1,0 +1,74 @@
+package queue
+
+import (
+	"encoding/json"
+	"log"
+	"net/http"
+)
+
+func NewQueueService() *QueueService {
+	return &QueueService{
+		queue: NewQueue(),
+		stats: &QueueStats{},
+	}
+}
+
+func (qs *QueueService) HandlePush(w http.ResponseWriter, r *http.Request) {
+	var item QueueItem
+	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	qs.queue.Push(item)
+	qs.stats.IncrementPushed()
+
+	log.Printf("Added job %s, queue size=%d",
+		item.Job.JobId.Hex(),
+		qs.queue.Size(),
+	)
+
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (qs *QueueService) HandlePop(w http.ResponseWriter, r *http.Request) {
+	item := qs.queue.Pop()
+	if item == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	qs.stats.IncrementPopped()
+
+	json.NewEncoder(w).Encode(item)
+
+	log.Printf("Popped job %s, queue size=%d",
+		item.Job.JobId.Hex(),
+		qs.queue.Size(),
+	)
+}
+
+func (qs *QueueService) HandlePeek(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Peeked job")
+	item := qs.queue.Peek()
+	if item == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	json.NewEncoder(w).Encode(item)
+
+	log.Printf("Peeked job %s", item.Job.JobId.Hex())
+}
+
+func (qs *QueueService) HandleGetAll(w http.ResponseWriter, r *http.Request) {
+	items := qs.queue.GetAll()
+	json.NewEncoder(w).Encode(items)
+
+	log.Printf("Returned %d jobs", len(items))
+}
+
+func (qs *QueueService) HandleStats(w http.ResponseWriter, r *http.Request) {
+	stats := qs.stats.Get()
+	json.NewEncoder(w).Encode(stats)
+}

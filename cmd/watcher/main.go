@@ -32,7 +32,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	http.HandleFunc("/queue", watcher.HandleGetQueue)
 	http.HandleFunc("/stats", watcher.HandleStats)
 
 	log.Println("Watcher running on port", port)
