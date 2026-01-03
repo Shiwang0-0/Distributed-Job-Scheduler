@@ -1,8 +1,10 @@
 ### commands to run
 - open terminal in the root folder run `PORT=8081 go run cmd/scheduler/main.go`  
 - similary for PORT=8082 and 8083 in other terminals  
-- additionaly to start the API gateway run `go run cmd/gateway/main.go`  
-- also start the Watcher by running `PORT=9001 go run cmd/watcher/main.go`
+- start the API gateway run `go run cmd/gateway/main.go`  
+- start the Watcher by running `PORT=9001 go run cmd/watcher/main.go`
+- start the Queue Service by running `go run cmd/queue_service/main.go`
+- start the Worker by running `PORT=7001 CONCURRENCY=5 go run cmd/worker/main.go`
 
 - send a request to APIGateway run  
     ```
@@ -22,11 +24,15 @@
     ```
         curl "http://localhost:9001/stats"
     ```
-- get queued jobs (by watcher)
+- queue 
     ```
-        curl "http://localhost:9001/queue"
+        curl "http://localhost:6000/queue"
+        curl "http://localhost:6000/stats"
     ```
-
+- worker
+    ```
+        curl "http://localhost:7001/stats"
+    ```
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        CLIENT                                │
@@ -94,9 +100,25 @@
           └─────────────────┼──────────────────┘
                             │
                             ↓ Each adds jobs they claimed
-                      ┌───────────┐
-                      │   Queue   │
-                      └───────────┘
+                      ┌────────────┐
+                      │   Queue    │
+                      └────────────┘
+                            ↓ PULL (LEASE on job for some duration)
+          ┌─────────────────┼───────────────────┐
+    ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+    │   Worker 1   │  │   Worker 2   │  │   Worker 3   │
+    │              │  │              │  │              │ (each worker concurreny<=5)
+    │   execute    │  │              │  │              │ (pull with jitter)
+    │    job       │  │              │  │              │ (exponential retries ==> (RetryCount^2 * 10) seconds)
+    └──────────────┘  └──────────────┘  └──────────────┘
+          │                 │                  │
+          └─────────────────┼──────────────────┘
+                            ↓ UPDATE (DELETE job from queue after maxRetries)
+                     ┌──────────────┐
+                     │   MongoDB    │
+                     │ - jobs       │
+                     │ - executions │
+                     └──────────────┘
 ```
 
 ```
@@ -128,5 +150,22 @@
     Winner adds job to priority queue
         ↓
     Losers see "already claimed" and move on
+
+
+
+    Worker claims job with a LEASE (timeout)
+        ↓
+    Worker processes job
+        ↓
+    Case 1: Worker succeeds
+        └─ Acknowledge job → Remove from queue
+        └─ Write job successful in DB
+        
+    Case 2: Worker fails/crashes
+        └─ Lease expires → Job becomes available again
+        └─ Write job pending in DB
+        
+    Case 3: After N retries (1+N) approach
+        └─ write job failed (Dead) in DB 
 
 ```
