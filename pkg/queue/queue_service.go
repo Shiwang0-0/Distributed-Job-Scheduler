@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 )
 
 func NewQueueService() *QueueService {
@@ -14,7 +15,7 @@ func NewQueueService() *QueueService {
 }
 
 func (qs *QueueService) HandlePush(w http.ResponseWriter, r *http.Request) {
-	var item QueueItem
+	var item *QueueItem
 	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
 		http.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
@@ -31,6 +32,7 @@ func (qs *QueueService) HandlePush(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 }
 
+/*
 func (qs *QueueService) HandlePop(w http.ResponseWriter, r *http.Request) {
 	item := qs.queue.Pop()
 	if item == nil {
@@ -46,6 +48,62 @@ func (qs *QueueService) HandlePop(w http.ResponseWriter, r *http.Request) {
 		item.Job.JobId.Hex(),
 		qs.queue.Size(),
 	)
+}
+*/
+
+func (qs *QueueService) HandleDelete(w http.ResponseWriter, r *http.Request) {
+	jobId := r.URL.Query().Get("job_id")
+	if jobId == "" {
+		http.Error(w, "missing job_id", http.StatusBadRequest)
+		return
+	}
+
+	found := qs.queue.DeleteJob(jobId)
+	if !found {
+		http.Error(w, "job not found in local queue", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (qs *QueueService) HandleLease(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		WorkerId string `json:"worker_id"`
+	}
+	json.NewDecoder(r.Body).Decode(&body)
+
+	leaseDuration := 30 * time.Second
+
+	item := qs.queue.Lease(body.WorkerId, leaseDuration)
+	if item == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	qs.stats.IncrementPopped()
+
+	json.NewEncoder(w).Encode(item)
+
+	log.Printf("Leased job %s to %s until %v",
+		item.Job.JobId.Hex(),
+		body.WorkerId,
+		item.VisibleAt,
+	)
+}
+
+func (qs *QueueService) HandleReleaseLease(w http.ResponseWriter, r *http.Request) {
+	jobId := r.URL.Query().Get("job_id")
+	if jobId == "" {
+		http.Error(w, "missing job_id", http.StatusBadRequest)
+		return
+	}
+
+	found := qs.queue.ReleaseLease(jobId)
+	if !found {
+		http.Error(w, "job not found in local queue", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (qs *QueueService) HandlePeek(w http.ResponseWriter, r *http.Request) {

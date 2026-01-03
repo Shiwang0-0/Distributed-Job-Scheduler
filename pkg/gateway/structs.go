@@ -25,11 +25,13 @@ type Job struct {
 	Payload     string             `json:"payload" bson:"payload"`
 	RetryCount  int                `json:"retry_count" bson:"retry_count"`
 	MaxRetries  int                `json:"max_retries" bson:"max_retries"`
+	LockedBy    string             `json:"locked_by" bson:"locked_by"`
+	LockedUntil time.Time          `json:"locked_until" bson:"locked_until"`
 }
 
 type JobExecution struct {
-	ExecId       primitive.ObjectID `json:"exec_id" bson:"exec_id,omitempty"`
 	JobId        primitive.ObjectID `json:"job_id" bson:"job_id"`
+	WorkerId     string             `json:"worker_id" bson:"worker_id,omitempty"`
 	StartedAt    time.Time          `json:"started_at" bson:"started_at"`
 	FinishedAt   *time.Time         `json:"finished_at,omitempty" bson:"finished_at,omitempty"`
 	Status       string             `json:"status" bson:"status"`

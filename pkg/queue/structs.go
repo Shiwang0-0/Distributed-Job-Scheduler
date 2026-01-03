@@ -7,12 +7,15 @@ import (
 )
 
 type Queue struct {
-	items []QueueItem
+	items []*QueueItem
 	mu    sync.RWMutex
 }
 
 type QueueItem struct {
-	Job gateway.Job
+	Job       gateway.Job
+	VisibleAt time.Time // visible timeout
+	ClaimedBy string
+	ClaimedAt time.Time
 }
 
 type QueueService struct {

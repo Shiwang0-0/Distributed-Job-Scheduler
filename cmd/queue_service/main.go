@@ -12,7 +12,10 @@ func main() {
 	queueService := queue.NewQueueService()
 
 	http.HandleFunc("/queue/push", queueService.HandlePush)
-	http.HandleFunc("/queue/pop", queueService.HandlePop)
+	// http.HandleFunc("/queue/pop", queueService.HandlePop)
+	http.HandleFunc("/queue/delete", queueService.HandleDelete)
+	http.HandleFunc("/queue/lease", queueService.HandleLease)
+	http.HandleFunc("/queue/release-lease", queueService.HandleReleaseLease)
 	http.HandleFunc("/queue/peek", queueService.HandlePeek)
 	http.HandleFunc("/queue", queueService.HandleGetAll)
 	http.HandleFunc("/stats", queueService.HandleStats)
