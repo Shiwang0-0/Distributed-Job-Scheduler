@@ -25,6 +25,7 @@ type Job struct {
 	Payload     string             `json:"payload" bson:"payload"`
 	RetryCount  int                `json:"retry_count" bson:"retry_count"`
 	MaxRetries  int                `json:"max_retries" bson:"max_retries"`
+	RetryAfter  *time.Time         `json:"retry_after,omitempty" bson:"retry_after,omitempty"`
 	LockedBy    string             `json:"locked_by" bson:"locked_by"`
 	LockedUntil time.Time          `json:"locked_until" bson:"locked_until"`
 }

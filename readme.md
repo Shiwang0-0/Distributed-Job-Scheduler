@@ -101,7 +101,7 @@
                             │
                             ↓ Each adds jobs they claimed
                       ┌────────────┐
-                      │   Queue    │
+                      │   Queue    │  (if Queue Failed, rollback claimed job by setting status="pending")
                       └────────────┘
                             ↓ PULL (LEASE on job for some duration)
           ┌─────────────────┼───────────────────┐

@@ -52,6 +52,9 @@ func NewWatcher(mongoURI, dbName, port string) (*Watcher, error) {
 
 	watcher.JobClaimPoller(interval)
 
+	watcher.RecoverStaleJobs(30 * time.Second) // check for jobs that were failed
+	//  because the watcher crashed or died before it could rollback.
+
 	return watcher, nil
 
 }
@@ -96,6 +99,9 @@ func (watcher *Watcher) HandleJobClaim() {
 				{"claimed_by": bson.M{"$exists": false}},
 				{"claimed_by": nil},
 				{"claimed_by": ""},
+				{"retry_after": bson.M{"$exists": false}},
+				{"retry_after": nil},
+				{"retry_after": bson.M{"$lte": now}},
 			},
 		}
 
@@ -161,6 +167,11 @@ func (watcher *Watcher) addJobToQueue(job *gateway.Job) {
 
 	if err != nil || resp.StatusCode != http.StatusOK {
 		log.Printf("Watcher:%s failed to push job %s", watcher.watcherId, job.JobId)
+
+		// if watcher died before rollback, then RecoverStaleJobs takes care of it
+
+		watcher.rollbackClaimedJobs(job, ctx, collection, now)
+
 		return
 	}
 
@@ -168,10 +179,14 @@ func (watcher *Watcher) addJobToQueue(job *gateway.Job) {
 		ctx,
 		bson.M{"_id": job.JobId},
 		bson.M{"$set": bson.M{
-			"status":     "queued",
-			"queued_at":  now,
-			"updated_at": now,
-		}},
+			"status":      "queued",
+			"queued_at":   now,
+			"updated_at":  now,
+			"retry_count": 0,
+		},
+			"$unset": bson.M{
+				"retry_after": "",
+			}},
 	)
 
 	if err != nil {
@@ -189,4 +204,91 @@ func (watcher *Watcher) HandleStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+func (watcher *Watcher) rollbackClaimedJobs(job *gateway.Job, ctx context.Context, collection *mongo.Collection, now time.Time) {
+
+	// exponential backoff delay
+	retryCount := job.RetryCount
+	if retryCount == 0 {
+		retryCount = 1
+	}
+
+	backoffSeconds := 1 << uint(retryCount) // 2^retrycount capped at 300 seconds
+	if backoffSeconds > 300 {
+		backoffSeconds = 300
+	}
+	retryAfter := now.Add(time.Duration(backoffSeconds) * time.Second)
+
+	_, rollbackErr := collection.UpdateOne(
+		ctx,
+		bson.M{"_id": job.JobId},
+		bson.M{
+			"$set": bson.M{
+				"status":      "pending",
+				"claimed_by":  nil,
+				"claimed_at":  nil,
+				"retry_after": retryAfter,
+				"updated_at":  now,
+			},
+			"$inc": bson.M{
+				"retry_count": 1,
+			},
+		},
+	)
+
+	if rollbackErr != nil {
+		log.Printf("Watcher:%s CRITICAL: Failed to rollback job %s: %v",
+			watcher.watcherId, job.JobId, rollbackErr)
+	} else {
+		log.Printf("Watcher:%s Rolled back job %s, will retry after %s (attempt %d)",
+			watcher.watcherId, job.JobId, retryAfter.Format(time.RFC3339),
+			job.RetryCount+1)
+	}
+
+}
+
+func (watcher *Watcher) RecoverStaleJobs(interval time.Duration) {
+	watcher.wg.Add(1)
+	go func() {
+		defer watcher.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				watcher.handleStaleJobRecovery()
+			case <-watcher.stopChannel:
+				return
+			}
+		}
+	}()
+}
+
+func (watcher *Watcher) handleStaleJobRecovery() {
+	ctx := context.Background()
+	collection := watcher.db.Collection("jobs")
+
+	// get jobs claimed more than 30 seconds but not queued
+	staleThreshold := time.Now().Add(-30 * time.Second)
+
+	filter := bson.M{
+		"status":     "claimed",
+		"claimed_at": bson.M{"$lt": staleThreshold},
+	}
+
+	update := bson.M{"$set": bson.M{
+		"status":     "pending",
+		"claimed_by": nil,
+		"claimed_at": nil,
+		"updated_at": time.Now(),
+	}}
+
+	result, err := collection.UpdateMany(ctx, filter, update)
+	if err != nil {
+		log.Printf("Watcher:%s Error recovering stale jobs: %v", watcher.watcherId, err)
+	} else if result.ModifiedCount > 0 {
+		log.Printf("Watcher:%s Recovered %d stale jobs", watcher.watcherId, result.ModifiedCount)
+	}
 }
