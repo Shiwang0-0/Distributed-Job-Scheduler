@@ -14,6 +14,26 @@
             "payload": "test job"
         }'
     ```
+
+    ```
+        Writing Cron Expression
+        Format:     "minute hour"
+        "*/5 *"     Every 5 minutes
+        "0 *"       Every hour at :00
+        "0 9"       9:00 AM daily
+        "30 14"     2:30 PM daily
+        "0 */2"     Every 2 hours at :00 (0:00, 2:00, 4:00, ...)
+        "* 9"       Every minute from 9:00 AM to 9:59 AM
+
+        curl -X POST http://localhost:8080/api/jobs \
+        -H "Content-Type: application/json" \
+        -d '{
+            "type": "cron",
+            "cron_expr": "*/2 *",
+            "payload": "run every 2 minutes"
+        }'
+    ```
+
 - get jobs  (gateway takes this request)
     ```  
         curl "http://localhost:8080/jobs"   
@@ -66,8 +86,10 @@
     ┌───────────┐    ┌───────────┐    ┌───────────┐
     │SCHEDULER 1│    │SCHEDULER 2│    │SCHEDULER 3│
     │ Port 8081 │    │ Port 8082 │    │ Port 8083 │
+    │           │    │           │    │           │     LEADER ELECTION RUNNING IN SEPERATE GO ROUTINE
+    │  LEADER   │    │           │    │           │                 (To Schedule CRON JOB)
     │           │    │           │    │           │
-    │ - Writes  │    │ - Writes  │    │ - Writes  │
+    │ - Writes  │    │ - Writes  │    │ - Writes  │                 
     │   to DB   │    │   to DB   │    │   to DB   │
     │ - Get     │    │ - Get     │    │ - Get     │
     │   Jobs    │    │   Jobs    │    │   Jobs    │
@@ -82,6 +104,8 @@
                   │    MONGODB      │
                   │                 │
                   │ - jobs          │
+                  │ - job_executions│
+                  │ - job_executions│
                   │ - job_executions│
                   └─────────────────┘
                             │
@@ -169,3 +193,56 @@
         └─ write job failed (Dead) in DB 
 
 ```
+
+### Why this Architecture ? (clarifications and tradeoffs)
+
+- API Gateway
+    - A Simple API Gateway that lets Client send HTTP requests
+
+- Load Balancer
+    - A simple Load balancer that works on round robin order and distributes the Job to the Schedulers
+
+- Scheduler
+    - For Normal Jobs, Scheduler dumps the incoming request to the DB
+    - In case of Cron Jobs, Scheduler for the first time dumps the Cron Job in the DB and later by initializing a Leader Election, </br> Leader picks the Cron Job and Create a Normal Job to be executed at the Moment
+    - This Creation of new job helps in unqiuely determining every Cron Job independently (each have unique ObjectId)
+    - For Cron, a seperate go routine for the Leader Election is present that only interacts with the crons </br> and does not bother the normal job flow of the scheduler
+
+    - Leader election ONLY for cron rule evaluation
+    - NO leader election for normal job processing
+
+    - Why DB level locking for Normal Jobs but Leader Election for Cron ?
+        - cron jobs because cron scheduling is a time-coordination problem, not a data-claiming problem
+        - When the first time Cron is writtern in the DB, it is never meant to be executed </br> it is there only to let the schedulers know that there is some cron job defination (whose instance will be created based on some specified time)
+        - Since the Schedulers dont have the ```JobId``` (because there is no job yet) and it is a time based decision in normal multiple scheduler case, </br> multiple watchers might tend to create multiple jobs based on the same job description present in the DB
+        - Another case could be that for multiple schedulers time could differ, one might execute an early job because with its respect the time to execute was reached </br> while it is still early running, other scheduler comes and runs it again at the correct time at which it was supposed to run , this will create multiple execution.
+
+        - Leader election gives a single time owner, which simplifies correctness and prevents missed or duplicate executions
+
+- Watchers
+    - Watchers Watches the Normal One Time Jobs (both included the actual once and the once create by the Cron)
+
+    - Multiple Watchers + DB level locking (why not leader election)
+        - In case of multiple watchers if one watcher dies others can still continue doing the task
+        - There will be no need to wait for currTime + IntervalPeriod to select the new leader
+        - Watchers are suppose to be dump and disposable
+        - With multiple watchers the throughput will be high whereas a single leader might be a bottleneck
+        - Multiple watchers dont need coordination
+        - In the worst case where the write has already been done but the response was not received, Idempotency at the DB layer will save duplicate reads
+
+- Queue
+    - A simple Producer Consumer Based Queue
+
+    - Failing of Queue
+        - If somewhere Queue failed, The task marked as "Queued" will be re-polled by the Watcher from the DB
+        - This re-polling will ensure that Once the task is writtern to the Db it will ultimately gets executed
+
+- Workers
+    - Working Entities that executes the Work
+    - Made use of DB level locking (High Execution Rate)
+    
+    - Failing of a Worker
+        - Workers never POP the task from the Queue, they always take a lease on the Job
+        - If Worker A is not able to do the task in the given period, an exponential wait is put to it
+        - By the time, other workers will try to take the lease and execute them
+        - If non of them was able to execute it, the Job is marked as "Failed"

@@ -94,14 +94,24 @@ func (watcher *Watcher) HandleJobClaim() {
 		// find jobs that are ready to be claimed
 		filter := bson.M{
 			"status":       "pending",
+			"type":         gateway.JobTypeOnce, // jobs that are only for once will be taken from the DB
 			"scheduled_at": bson.M{"$lte": now}, // now or past both
-			"$or": []bson.M{
-				{"claimed_by": bson.M{"$exists": false}},
-				{"claimed_by": nil},
-				{"claimed_by": ""},
-				{"retry_after": bson.M{"$exists": false}},
-				{"retry_after": nil},
-				{"retry_after": bson.M{"$lte": now}},
+			"$and": []bson.M{
+				{
+					"$or": []bson.M{
+						{"claimed_by": bson.M{"$exists": false}},
+						{"claimed_by": nil},
+						{"claimed_by": ""},
+					},
+				},
+				// Must not have retry_after, or retry_after has passed
+				{
+					"$or": []bson.M{
+						{"retry_after": bson.M{"$exists": false}},
+						{"retry_after": nil},
+						{"retry_after": bson.M{"$lte": now}},
+					},
+				},
 			},
 		}
 
@@ -165,7 +175,7 @@ func (watcher *Watcher) addJobToQueue(job *gateway.Job) {
 		bytes.NewReader(body),
 	)
 
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil || (resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated) {
 		log.Printf("Watcher:%s failed to push job %s", watcher.watcherId, job.JobId)
 
 		// if watcher died before rollback, then RecoverStaleJobs takes care of it

@@ -17,7 +17,13 @@ func dbIndexes(db *mongo.Database, ctx context.Context) error {
 			Keys: bson.D{{Key: "status", Value: 1}},
 		},
 		{
-			Keys: bson.D{{Key: "next_run_at", Value: 1}},
+			Keys: bson.D{{Key: "scheduled_at", Value: 1}}, // changed from next_run_at
+		},
+		{
+			Keys: bson.D{
+				{Key: "status", Value: 1},
+				{Key: "scheduled_at", Value: 1},
+			},
 		},
 	}
 
@@ -38,5 +44,36 @@ func dbIndexes(db *mongo.Database, ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	completedJobsCollection := db.Collection("completed_jobs")
+	completedJobsIndexes := []mongo.IndexModel{
+		{
+			Keys: bson.D{{Key: "completed_at", Value: -1}},
+		},
+		{
+			Keys: bson.D{{Key: "type", Value: 1}},
+		},
+	}
+
+	_, err = completedJobsCollection.Indexes().CreateMany(ctx, completedJobsIndexes)
+	if err != nil {
+		return err
+	}
+
+	failedJobsCollection := db.Collection("failed_jobs")
+	failedJobsIndexes := []mongo.IndexModel{
+		{
+			Keys: bson.D{{Key: "failed_at", Value: -1}},
+		},
+		{
+			Keys: bson.D{{Key: "type", Value: 1}},
+		},
+	}
+
+	_, err = failedJobsCollection.Indexes().CreateMany(ctx, failedJobsIndexes)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }

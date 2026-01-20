@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"distributed-job-scheduler/pkg/scheduler"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/joho/godotenv"
 )
@@ -32,11 +35,43 @@ func main() {
 		log.Fatal(err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start leader election process
+	scheduler.StartLeaderElection(ctx)
+
 	http.HandleFunc("/health", scheduler.HandleHealth)
 	http.HandleFunc("/schedule", scheduler.HandleSchedule)
 	http.HandleFunc("/jobs", scheduler.HandleGetJobs)
 	http.HandleFunc("/job", scheduler.HandleGetJobById)
 
-	log.Println("Scheduler running on port", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	server := &http.Server{
+		Addr: ":" + port,
+	}
+
+	go func() {
+		log.Printf("Scheduler running on port %s", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("Shutting down server...")
+
+	// Shutdown scheduler (releases lease, stops goroutines)
+	if err := scheduler.Shutdown(ctx); err != nil {
+		log.Printf("Scheduler shutdown error: %v", err)
+	}
+
+	// Shutdown HTTP server
+	if err := scheduler.Shutdown(ctx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	log.Println("Server stopped")
 }

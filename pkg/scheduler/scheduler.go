@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"distributed-job-scheduler/pkg/cron"
 	"distributed-job-scheduler/pkg/gateway"
 	"encoding/json"
 	"fmt"
@@ -43,16 +44,28 @@ func NewScheduler(mongoURI, dbName, port string) (*Scheduler, error) {
 		db:         db,
 		port:       port,
 		instanceId: fmt.Sprintf("scheduler-instance-%s", port),
+		cronJobs:   make(map[string]*cron.CronSchedule),
+		stopChan:   make(chan struct{}),
+		isLeader:   false,
 	}
 	log.Printf("Scheduler:%s Job scheduler started", port)
+
+	if err := scheduler.CronJobLoader(ctx); err != nil {
+		log.Printf("Scheduler:%s Warning: Failed to load cron jobs: %v", port, err)
+	}
 
 	return scheduler, nil
 }
 
 func (s *Scheduler) HandleHealth(w http.ResponseWriter, _ *http.Request) {
+	s.leaderMu.RLock()
+	isLeader := s.isLeader
+	s.leaderMu.RUnlock()
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status": "healthy",
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":      "healthy",
+		"instance_id": s.instanceId,
+		"is_leader":   isLeader,
 	})
 }
 
@@ -84,12 +97,43 @@ func (s *Scheduler) HandleSchedule(w http.ResponseWriter, r *http.Request) {
 		job.MaxRetries = 5 // Default max retries
 	}
 
-	job.Status = "pending"
 	job.RetryCount = 0
 	job.CreatedAt = now
+	job.UpdatedAt = now
 
-	log.Printf("Scheduler:%s scheduled: %s",
-		s.port, job.ScheduledAt.Format(time.RFC3339))
+	if job.Type == gateway.JobTypeCron {
+		// CRON JOB: stays "active", never goes to queue
+		job.Status = "active"
+
+		if job.CronExpr == "" {
+			http.Error(w, "Cron expression required for cron jobs", http.StatusBadRequest)
+			return
+		}
+
+		// Validate and set next run time
+		schedule, err := cron.ParseCronExpr(job.CronExpr)
+		if err != nil {
+			log.Printf("Scheduler:%s Invalid cron expression: %v", s.port, err)
+			http.Error(w, fmt.Sprintf("Invalid cron expression: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		job.NextRunAt = schedule.Next(now)
+		log.Printf("Scheduler:%s Cron job scheduled: %s (next run: %s)",
+			s.port, job.CronExpr, job.NextRunAt.Format(time.RFC3339))
+
+	} else {
+		// ONCE JOB: starts as "pending", goes to queue
+		job.Type = "once"
+		job.Status = "pending"
+
+		if job.ScheduledAt.IsZero() {
+			job.ScheduledAt = now
+		}
+
+		log.Printf("Scheduler:%s One-time job scheduled: %s",
+			s.port, job.ScheduledAt.Format(time.RFC3339))
+	}
 
 	ctx, cancle := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancle()
@@ -105,6 +149,14 @@ func (s *Scheduler) HandleSchedule(w http.ResponseWriter, r *http.Request) {
 	job.JobId = result.InsertedID.(primitive.ObjectID)
 
 	log.Printf("Scheduler:%s wrote to DB: %s (status: pending)", s.port, job.JobId)
+
+	if job.Type == gateway.JobTypeCron && s.IsLeader() {
+		schedule, _ := cron.ParseCronExpr(job.CronExpr)
+		s.cronMutex.Lock()
+		s.cronJobs[job.JobId.Hex()] = schedule
+		s.cronMutex.Unlock()
+		log.Printf("Scheduler:%s Loaded cron job %s into memory", s.port, job.JobId.Hex())
+	}
 
 	res := gateway.JobResponse{
 		JobId:   job.JobId.Hex(),
@@ -124,10 +176,14 @@ func (s *Scheduler) HandleGetJobs(w http.ResponseWriter, r *http.Request) {
 	// search for specific status job
 	// ?status="pending"
 	status := r.URL.Query().Get("status")
+	jobType := r.URL.Query().Get("type")
 
 	filter := bson.M{}
 	if status != "" {
 		filter["status"] = status
+	}
+	if jobType != "" {
+		filter["type"] = jobType
 	}
 
 	// find returns a pointer to the matched document

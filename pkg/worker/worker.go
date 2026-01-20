@@ -177,20 +177,25 @@ func (worker *Worker) executeJob(job *gateway.Job) {
 		}},
 	)
 
-	worker.finalizeJobInDB(job, finalJobStatus, finishedAt)
-
-	if execErr == nil || finalJobStatus == "failed" {
-		if execErr == nil {
-			worker.stats.IncrementSuccessCount()
-			log.Printf("SUCCESS: Job %s Executed...", job.JobId.Hex())
-		} else {
-			worker.stats.IncrementFailureCount()
-		}
-		worker.deleteFromQueue(job.JobId.Hex())
-	} else {
+	switch finalJobStatus {
+	case "pending":
+		// Job needs retry - update in jobs collection
+		worker.finalizeJobInDB(job, finalJobStatus, finishedAt)
 		worker.releaseLease(job.JobId.Hex())
+	case "completed":
+		// Job succeeded - move to completed_jobs
+		worker.moveToCompletedJobs(job, finishedAt)
+		worker.stats.IncrementSuccessCount()
+		log.Printf("SUCCESS: Job %s Executed...", job.JobId.Hex())
+	case "failed":
+		// Job permanently failed - move to failed_jobs
+		worker.moveToFailedJobs(job, finishedAt, errorMsg)
+		worker.stats.IncrementFailureCount()
 	}
 
+	if finalJobStatus == "completed" || finalJobStatus == "failed" {
+		worker.deleteFromQueue(job.JobId.Hex())
+	}
 }
 
 func (worker *Worker) prepareToExecute(job *gateway.Job, startTime time.Time) primitive.ObjectID {
@@ -261,6 +266,77 @@ func (worker *Worker) finalizeJobInDB(job *gateway.Job, finalStatus string, fini
 		log.Printf("Worker:%s Error finalizing job %s in DB: %v",
 			worker.workerId, job.JobId.Hex(), err)
 	}
+}
+
+func (worker *Worker) moveToCompletedJobs(job *gateway.Job, finishedAt time.Time) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Create completed job record
+	completedJob := bson.M{
+		"_id":          job.JobId,
+		"type":         job.Type,
+		"payload":      job.Payload,
+		"retry_count":  job.RetryCount,
+		"max_retries":  job.MaxRetries,
+		"worker_id":    worker.workerId,
+		"created_at":   job.CreatedAt,
+		"completed_at": finishedAt,
+		"status":       "completed",
+	}
+
+	// completed_jobs collection
+	_, err := worker.db.Collection("completed_jobs").InsertOne(ctx, completedJob)
+	if err != nil {
+		log.Printf("Worker:%s Error moving job %s to completed_jobs: %v",
+			worker.workerId, job.JobId.Hex(), err)
+		return
+	}
+
+	// Delete from active jobs collection
+	_, err = worker.db.Collection("jobs").DeleteOne(ctx, bson.M{"_id": job.JobId})
+	if err != nil {
+		log.Printf("Worker:%s Error deleting job %s from jobs: %v",
+			worker.workerId, job.JobId.Hex(), err)
+	}
+
+	log.Printf("Worker:%s Moved job %s to completed_jobs", worker.workerId, job.JobId.Hex())
+}
+
+func (worker *Worker) moveToFailedJobs(job *gateway.Job, finishedAt time.Time, errorMsg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// failed job record
+	failedJob := bson.M{
+		"_id":           job.JobId,
+		"type":          job.Type,
+		"payload":       job.Payload,
+		"retry_count":   job.RetryCount,
+		"max_retries":   job.MaxRetries,
+		"worker_id":     worker.workerId,
+		"created_at":    job.CreatedAt,
+		"failed_at":     finishedAt,
+		"status":        "failed",
+		"error_message": errorMsg,
+	}
+
+	// failed_jobs collection
+	_, err := worker.db.Collection("failed_jobs").InsertOne(ctx, failedJob)
+	if err != nil {
+		log.Printf("Worker:%s Error moving job %s to failed_jobs: %v",
+			worker.workerId, job.JobId.Hex(), err)
+		return
+	}
+
+	// Delete from active jobs collection
+	_, err = worker.db.Collection("jobs").DeleteOne(ctx, bson.M{"_id": job.JobId})
+	if err != nil {
+		log.Printf("Worker:%s Error deleting job %s from jobs: %v",
+			worker.workerId, job.JobId.Hex(), err)
+	}
+
+	log.Printf("Worker:%s Moved job %s to failed_jobs", worker.workerId, job.JobId.Hex())
 }
 
 func (worker *Worker) deleteFromQueue(jobId string) {

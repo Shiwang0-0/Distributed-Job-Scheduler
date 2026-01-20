@@ -11,8 +11,16 @@ type APIGateway struct {
 	lb *loadbalancer.LoadBalancer
 }
 
+type JobType string
+
+const (
+	JobTypeOnce JobType = "once"
+	JobTypeCron JobType = "cron"
+)
+
 type Job struct {
 	JobId       primitive.ObjectID `json:"job_id" bson:"_id,omitempty"` // bson needs to be _id only
+	Type        JobType            `bson:"type" json:"type"`
 	ScheduledAt time.Time          `json:"scheduled_at" bson:"scheduled_at"`
 	CreatedAt   time.Time          `json:"created_at" bson:"created_at"`
 	LastRunAt   time.Time          `json:"last_run_at" bson:"last_run_at"`
@@ -28,6 +36,9 @@ type Job struct {
 	RetryAfter  *time.Time         `json:"retry_after,omitempty" bson:"retry_after,omitempty"`
 	LockedBy    string             `json:"locked_by" bson:"locked_by"`
 	LockedUntil time.Time          `json:"locked_until" bson:"locked_until"`
+
+	// cron job
+	CronExpr string `json:"cron_expr,omitempty" bson:"cron_expr,omitempty"`
 }
 
 type JobExecution struct {
