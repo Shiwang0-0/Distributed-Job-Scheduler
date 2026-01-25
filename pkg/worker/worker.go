@@ -14,12 +14,11 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-func NewWorker(mongoURI, dbName, port string, concurrency int) (*Worker, error) {
+func NewWorker(mongoURI, dbName, port, coordinatorPort string, concurrency int) (*Worker, error) {
 	ctx, cancle := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancle()
 
@@ -38,21 +37,94 @@ func NewWorker(mongoURI, dbName, port string, concurrency int) (*Worker, error) 
 	db := client.Database(dbName)
 
 	worker := &Worker{
-		client:      client,
-		db:          db,
-		workerId:    workerId,
-		port:        port,
-		stats:       &WorkerStats{},
-		stopChannel: make(chan struct{}),
-		concurrency: concurrency,
-		semaphore:   make(chan struct{}, concurrency),
+		client:          client,
+		db:              db,
+		workerId:        workerId,
+		port:            port,
+		coordinatorPort: coordinatorPort,
+		stats:           &WorkerStats{},
+		stopChannel:     make(chan struct{}),
+		concurrency:     concurrency,
+		semaphore:       make(chan struct{}, concurrency),
 	}
+
+	if err := worker.registerWithCoordinator(); err != nil {
+		return nil, fmt.Errorf("failed to register with coordinator: %w", err)
+	}
+	// send heart beats to coordinator
+	worker.startHeartbeat()
 
 	worker.startJobPuller()
 
 	log.Printf("Worker:%s Started ", workerId)
 
 	return worker, nil
+}
+
+func (worker *Worker) registerWithCoordinator() error {
+	reqBody := map[string]string{"worker_id": worker.workerId}
+	body, _ := json.Marshal(reqBody)
+
+	url := fmt.Sprintf("http://localhost:%s/coordinator/request-assignment", worker.coordinatorPort)
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to connect to coordinator: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("coordinator returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var assignment struct {
+		WorkerID  string `json:"worker_id"`
+		QueuePort string `json:"queue_port"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&assignment); err != nil {
+		return fmt.Errorf("failed to decode assignment: %w", err)
+	}
+
+	worker.assignedQueuePort = assignment.QueuePort
+	log.Printf("Worker:%s Assigned to queue port %s by coordinator", worker.workerId, worker.assignedQueuePort)
+
+	return nil
+}
+
+func (worker *Worker) startHeartbeat() {
+	worker.wg.Add(1)
+	go func() {
+		defer worker.wg.Done()
+		ticker := time.NewTicker(10 * time.Second) // every 10s
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				worker.sendHeartbeat()
+			case <-worker.stopChannel:
+				return
+			}
+		}
+	}()
+}
+
+func (worker *Worker) sendHeartbeat() {
+	reqBody := map[string]string{"worker_id": worker.workerId}
+	body, _ := json.Marshal(reqBody)
+
+	url := fmt.Sprintf("http://localhost:%s/coordinator/heartbeat", worker.coordinatorPort)
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("Worker:%s Failed to send heartbeat: %v", worker.workerId, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Worker:%s Heartbeat failed with status %d", worker.workerId, resp.StatusCode)
+	}
 }
 
 func (worker *Worker) startJobPuller() {
@@ -104,9 +176,13 @@ func (worker *Worker) startJobPuller() {
 }
 
 func (worker *Worker) pullJob() (*gateway.Job, error) {
-	reqBody := fmt.Sprintf(`"worker_id":"%s"`, worker.workerId)
+	reqBody := map[string]string{
+		"worker_id": worker.workerId,
+	}
+	body, _ := json.Marshal(reqBody)
 
-	res, err := http.Post("http://localhost:6000/queue/lease", "application/json", bytes.NewBufferString(reqBody))
+	url := fmt.Sprintf("http://localhost:%s/queue/lease", worker.assignedQueuePort)
+	res, err := http.Post(url, "application/json", bytes.NewReader(body))
 
 	if err != nil {
 		log.Printf("Worker:%s Error pulling job: %v", worker.workerId, err)
@@ -198,149 +274,8 @@ func (worker *Worker) executeJob(job *gateway.Job) {
 	}
 }
 
-func (worker *Worker) prepareToExecute(job *gateway.Job, startTime time.Time) primitive.ObjectID {
-	log.Printf("Worker:%s Preparing to Execute: %s ",
-		worker.workerId, job.JobId)
-
-	ctx := context.Background()
-
-	execution := gateway.JobExecution{
-		JobId:     job.JobId,
-		WorkerId:  worker.workerId,
-		StartedAt: startTime,
-		Status:    "running",
-	}
-
-	executionsCollection := worker.db.Collection("job_executions")
-
-	execResult, err := executionsCollection.InsertOne(ctx, execution)
-	if err != nil {
-		log.Printf("Worker:%s Error Preparing execution: %v", worker.workerId, err)
-	}
-
-	var executionId primitive.ObjectID
-	if execResult != nil {
-		executionId = execResult.InsertedID.(primitive.ObjectID)
-	}
-	return executionId
-}
-
-func (worker *Worker) finalizeJobInDB(job *gateway.Job, finalStatus string, finishedAt time.Time) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	update := bson.M{
-		"status":      finalStatus,
-		"retry_count": job.RetryCount,
-		"updated_at":  finishedAt,
-		"last_run_at": finishedAt,
-	}
-	// If the job needs to be retried, we release it from the lease
-	if finalStatus == "pending" {
-		update["claimed_by"] = nil
-		update["claimed_at"] = nil
-		update["locked_until"] = nil
-
-		// EXPONENTIAL BACKOFF:
-		// Wait (RetryCount^2 * 10) seconds before it can be picked up again
-		// retry 1: 10s | retry 2: 40s | retry 3: 90s
-		delay := time.Duration(job.RetryCount*job.RetryCount*10) * time.Second
-		update["scheduled_at"] = time.Now().Add(delay)
-
-		/* when you release the job, there might be possibility that same worker picks it again ?
-		but this possibility is when the worker was down (thats why it couldn't complete the task)
-		and if it is down it will either recover in (retry^2 * 10) seconds, if not other workers are free to pick the job
-		*/
-
-		log.Printf("Worker:%s Releasing job %s for retry in %v",
-			worker.workerId, job.JobId.Hex(), delay)
-	}
-
-	_, err := worker.db.Collection("jobs").UpdateOne(
-		ctx,
-		bson.M{"_id": job.JobId},
-		bson.M{"$set": update},
-	)
-
-	if err != nil {
-		log.Printf("Worker:%s Error finalizing job %s in DB: %v",
-			worker.workerId, job.JobId.Hex(), err)
-	}
-}
-
-func (worker *Worker) moveToCompletedJobs(job *gateway.Job, finishedAt time.Time) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Create completed job record
-	completedJob := bson.M{
-		"_id":          job.JobId,
-		"type":         job.Type,
-		"payload":      job.Payload,
-		"retry_count":  job.RetryCount,
-		"max_retries":  job.MaxRetries,
-		"worker_id":    worker.workerId,
-		"created_at":   job.CreatedAt,
-		"completed_at": finishedAt,
-		"status":       "completed",
-	}
-
-	// completed_jobs collection
-	_, err := worker.db.Collection("completed_jobs").InsertOne(ctx, completedJob)
-	if err != nil {
-		log.Printf("Worker:%s Error moving job %s to completed_jobs: %v",
-			worker.workerId, job.JobId.Hex(), err)
-		return
-	}
-
-	// Delete from active jobs collection
-	_, err = worker.db.Collection("jobs").DeleteOne(ctx, bson.M{"_id": job.JobId})
-	if err != nil {
-		log.Printf("Worker:%s Error deleting job %s from jobs: %v",
-			worker.workerId, job.JobId.Hex(), err)
-	}
-
-	log.Printf("Worker:%s Moved job %s to completed_jobs", worker.workerId, job.JobId.Hex())
-}
-
-func (worker *Worker) moveToFailedJobs(job *gateway.Job, finishedAt time.Time, errorMsg string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// failed job record
-	failedJob := bson.M{
-		"_id":           job.JobId,
-		"type":          job.Type,
-		"payload":       job.Payload,
-		"retry_count":   job.RetryCount,
-		"max_retries":   job.MaxRetries,
-		"worker_id":     worker.workerId,
-		"created_at":    job.CreatedAt,
-		"failed_at":     finishedAt,
-		"status":        "failed",
-		"error_message": errorMsg,
-	}
-
-	// failed_jobs collection
-	_, err := worker.db.Collection("failed_jobs").InsertOne(ctx, failedJob)
-	if err != nil {
-		log.Printf("Worker:%s Error moving job %s to failed_jobs: %v",
-			worker.workerId, job.JobId.Hex(), err)
-		return
-	}
-
-	// Delete from active jobs collection
-	_, err = worker.db.Collection("jobs").DeleteOne(ctx, bson.M{"_id": job.JobId})
-	if err != nil {
-		log.Printf("Worker:%s Error deleting job %s from jobs: %v",
-			worker.workerId, job.JobId.Hex(), err)
-	}
-
-	log.Printf("Worker:%s Moved job %s to failed_jobs", worker.workerId, job.JobId.Hex())
-}
-
 func (worker *Worker) deleteFromQueue(jobId string) {
-	url := fmt.Sprintf("http://localhost:6000/queue/delete?job_id=%s", jobId)
+	url := fmt.Sprintf("http://localhost:%s/queue/delete?job_id=%s", worker.assignedQueuePort, jobId)
 
 	req, err := http.NewRequest(http.MethodDelete, url, nil)
 	if err != nil {
@@ -357,8 +292,8 @@ func (worker *Worker) deleteFromQueue(jobId string) {
 }
 
 func (worker *Worker) releaseLease(jobId string) {
-	// We call a relase lease endpoint that resets the 'VisibleAt' timer
-	url := fmt.Sprintf("http://localhost:6000/queue/release-lease?job_id=%s", jobId)
+	// We call a release lease endpoint that resets the 'VisibleAt' timer
+	url := fmt.Sprintf("http://localhost:%s/queue/release-lease?job_id=%s", worker.assignedQueuePort, jobId)
 
 	resp, err := http.Post(url, "application/json", nil)
 	if err != nil {
@@ -367,21 +302,4 @@ func (worker *Worker) releaseLease(jobId string) {
 	}
 	log.Printf("Worker:%s Released Lease", worker.workerId)
 	defer resp.Body.Close()
-}
-
-func (worker *Worker) performJobWork(job *gateway.Job) (map[string]interface{}, error) {
-	result := make(map[string]interface{})
-	result["payload"] = job.Payload
-	result["worker_id"] = worker.workerId
-	result["executed_at"] = time.Now()
-	return result, nil
-}
-
-func (worker *Worker) HandleStats(w http.ResponseWriter, r *http.Request) {
-	stats := worker.stats.GetStats()
-	stats["worker_id"] = worker.workerId
-	stats["concurrency"] = worker.concurrency
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(stats)
 }

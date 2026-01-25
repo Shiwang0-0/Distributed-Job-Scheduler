@@ -8,13 +8,15 @@ import (
 )
 
 type Watcher struct {
-	client      *mongo.Client
-	db          *mongo.Database
-	watcherId   string
-	port        string
-	stats       *WatcherStats
-	wg          sync.WaitGroup
-	stopChannel chan struct{}
+	client        *mongo.Client
+	db            *mongo.Database
+	watcherId     string
+	port          string
+	stats         *WatcherStats
+	exchangePorts []string
+	wg            sync.WaitGroup
+	exchangeIndex int
+	stopChannel   chan struct{}
 }
 
 type WatcherStats struct {

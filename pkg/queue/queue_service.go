@@ -7,10 +7,12 @@ import (
 	"time"
 )
 
-func NewQueueService() *QueueService {
+func NewQueueService(queueID, port string) *QueueService {
 	return &QueueService{
-		queue: NewQueue(),
-		stats: &QueueStats{},
+		queue:   NewQueue(),
+		queueID: queueID,
+		port:    port,
+		stats:   &QueueStats{},
 	}
 }
 
@@ -24,10 +26,7 @@ func (qs *QueueService) HandlePush(w http.ResponseWriter, r *http.Request) {
 	qs.queue.Push(item)
 	qs.stats.IncrementPushed()
 
-	log.Printf("Added job %s, queue size=%d",
-		item.Job.JobId.Hex(),
-		qs.queue.Size(),
-	)
+	log.Printf("Added job %s, in queue %s size=%d", item.Job.JobId.Hex(), qs.queueID, qs.queue.Size())
 
 	w.WriteHeader(http.StatusCreated)
 }
@@ -84,11 +83,7 @@ func (qs *QueueService) HandleLease(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(item)
 
-	log.Printf("Leased job %s to %s until %v",
-		item.Job.JobId.Hex(),
-		body.WorkerId,
-		item.VisibleAt,
-	)
+	log.Printf("Queue %s Leased job %s to %s until %v", qs.queueID, item.Job.JobId.Hex(), body.WorkerId, item.VisibleAt)
 }
 
 func (qs *QueueService) HandleReleaseLease(w http.ResponseWriter, r *http.Request) {
@@ -116,14 +111,14 @@ func (qs *QueueService) HandlePeek(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(item)
 
-	log.Printf("Peeked job %s", item.Job.JobId.Hex())
+	log.Printf("Queue %s Peeked job %s", qs.queueID, item.Job.JobId.Hex())
 }
 
 func (qs *QueueService) HandleGetAll(w http.ResponseWriter, r *http.Request) {
 	items := qs.queue.GetAll()
 	json.NewEncoder(w).Encode(items)
 
-	log.Printf("Returned %d jobs", len(items))
+	log.Printf("Queue:%s Returned %d jobs", qs.queueID, len(items))
 }
 
 func (qs *QueueService) HandleStats(w http.ResponseWriter, r *http.Request) {

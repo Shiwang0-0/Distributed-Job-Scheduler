@@ -32,6 +32,14 @@
             "cron_expr": "*/2 *",
             "payload": "run every 2 minutes"
         }'
+        
+        curl -X POST http://localhost:8080/api/jobs \
+        -H "Content-Type: application/json" \
+        -d '{
+            "type": "once",
+            "payload": "high priority one time",
+            "priority":"high"
+        }'
     ```
 
 - get jobs  (gateway takes this request)
@@ -100,14 +108,13 @@
                            │
                            │ All connect to same DB
                            ↓
-                  ┌─────────────────┐
-                  │    MONGODB      │
-                  │                 │
-                  │ - jobs          │
-                  │ - job_executions│
-                  │ - job_executions│
-                  │ - job_executions│
-                  └─────────────────┘
+                 ┌────────────────────────┐
+                 │    MONGODB             │
+                 │ - jobs(cron/once)      │
+                 │ - job_executions (all) │
+                 │ - completed_jobs       |
+                 │ - failed_jobs          |
+                 └────────────────────────┘
                             │
                             │  All watchers poll concurrently
                             │  (with jitter + atomic FindOneAndUpdate)
@@ -120,14 +127,42 @@
    │   claimed    │  │   failed     │  │   failed     │
    │    job       │  │              │  │              │
    └──────────────┘  └──────────────┘  └──────────────┘
-          │                 │                  │
-          └─────────────────┼──────────────────┘
+          │                 │                   │
+          └─────┼─────────────────────┼─────────┘
+                │                     │
+                │  Push to exchanges  │
+                ▼                     ▼
+         ┌──────────────┐      ┌──────────────┐
+         │ Exchange 1   │      │ Exchange 2   │
+         │ (port 2001)  │      │ (port 2002)  │
+         └──────┬───────┘      └──────┬───────┘
+                │                     │
+                │  Fixed % N routing  │     (Route: Hash with job_type + retry_count)
+                │                     │   
+                ▼                     ▼
+            ┌──────────────────────────────┐
+            │  Fixed Queue List            │ (if queue failed, the waiting time will eventually expire)
+            │  • Normal Priority           │ (Watcher will again pick it from the DB, retry count changes)
+            │  • High Priority             │ (Visibility timeout / lease-based)
+            └──────────────────────────────┘
                             │
-                            ↓ Each adds jobs they claimed
-                      ┌────────────┐
-                      │   Queue    │  (if Queue Failed, rollback claimed job by setting status="pending")
-                      └────────────┘
-                            ↓ PULL (LEASE on job for some duration)
+                            |
+                            |
+                            |
+                            ↓
+        ┌───────────────────────────────────────────┐
+        │      COORDINATOR (Port 3000)              │
+        │                                           │
+        │  - Worker-to-Queue Assignment             │
+        |  - Persists Assignments to DB             |
+        │  - Heartbeat Tracking (10s interval)      │
+        └───────────────────────────────────────────┘
+                            |
+                            |
+                            | Assignment & Heartbeat
+                            |
+                            | PULL (LEASE on job for some duration)
+                            ↓ 
           ┌─────────────────┼───────────────────┐
     ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
     │   Worker 1   │  │   Worker 2   │  │   Worker 3   │
@@ -137,11 +172,15 @@
     └──────────────┘  └──────────────┘  └──────────────┘
           │                 │                  │
           └─────────────────┼──────────────────┘
-                            ↓ UPDATE (DELETE job from queue after maxRetries)
+                            |
+                            ↓
                      ┌──────────────┐
                      │   MongoDB    │
+                     │              │
                      │ - jobs       │
                      │ - executions │
+                     │ - completed  │
+                     │ - failed     │
                      └──────────────┘
 ```
 
@@ -246,3 +285,20 @@
         - If Worker A is not able to do the task in the given period, an exponential wait is put to it
         - By the time, other workers will try to take the lease and execute them
         - If non of them was able to execute it, the Job is marked as "Failed"
+
+
+
+
+- Locks taken by watchers in case of reading from the DB  
+    
+    for SQL there are normally 2 ways that you would lock (shared, exclusive) </br>
+    the problem with raw locks is that they are time consuming,  
+    - Shared locking: (multiple watchers can read same thing ) </br> in case of shared locking if watcher 1 locks the first row the other watcher can also read that row, </br> meaning same task will be executed twice (worse case)
+    - Exclusive locking: (both read and write but only to one watcher) </br>
+    watcher 1 locks the row 1 (status will be changed from "pending" to "claimed"), </br> watcher 2 comes and sees the row that it is locked (it waits because it doesnt know the status and the row is locked), </br> it wait for its turn but as soon as previous held lock is releases it sees that staus has already changed. (it waited for nothing) </br> this is better than the shared locking, but watcher is waiting at places when locks are held by other watchers which makes the locking slow
+    
+    making exclusive locking faster </br>
+    - SKIP LOCKING: if a row has a lock then skip it, dont wait for the lock to release, continue with the next rows  
+
+
+    </br>for monogo, FindOneAndUpdate() does atomic document update, so the filtering of task 1 with the new status happens for the watcher 2 immediately </br> (watcher 2 still waits, but for very short period, SQL's SKIP LOCKING overthrows mongo here)

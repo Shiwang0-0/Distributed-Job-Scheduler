@@ -8,15 +8,17 @@ import (
 )
 
 type Worker struct {
-	client      *mongo.Client
-	db          *mongo.Database
-	workerId    string
-	port        string
-	stopChannel chan struct{}
-	wg          sync.WaitGroup
-	stats       *WorkerStats
-	concurrency int
-	semaphore   chan struct{}
+	client            *mongo.Client
+	db                *mongo.Database
+	workerId          string
+	port              string
+	coordinatorPort   string
+	assignedQueuePort string
+	stopChannel       chan struct{}
+	wg                sync.WaitGroup
+	stats             *WorkerStats
+	concurrency       int
+	semaphore         chan struct{}
 }
 
 type WorkerStats struct {

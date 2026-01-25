@@ -18,9 +18,17 @@ const (
 	JobTypeCron JobType = "cron"
 )
 
+type JobPriority string
+
+const (
+	PriorityHigh   JobPriority = "high"
+	PriorityNormal JobPriority = "normal"
+)
+
 type Job struct {
 	JobId       primitive.ObjectID `json:"job_id" bson:"_id,omitempty"` // bson needs to be _id only
 	Type        JobType            `bson:"type" json:"type"`
+	Priority    JobPriority        `json:"priority" bson:"priority"`
 	ScheduledAt time.Time          `json:"scheduled_at" bson:"scheduled_at"`
 	CreatedAt   time.Time          `json:"created_at" bson:"created_at"`
 	LastRunAt   time.Time          `json:"last_run_at" bson:"last_run_at"`

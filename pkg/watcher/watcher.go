@@ -17,7 +17,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-func NewWatcher(mongoURI, dbName, port string) (*Watcher, error) {
+func NewWatcher(mongoURI, dbName, port string, exchangePorts []string) (*Watcher, error) {
 	ctx, cancle := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancle()
 
@@ -36,11 +36,13 @@ func NewWatcher(mongoURI, dbName, port string) (*Watcher, error) {
 	db := client.Database(dbName)
 
 	watcher := &Watcher{
-		client:    client,
-		db:        db,
-		port:      port,
-		watcherId: watcherID,
-		stats:     &WatcherStats{},
+		client:        client,
+		db:            db,
+		port:          port,
+		watcherId:     watcherID,
+		exchangePorts: exchangePorts,
+		stats:         &WatcherStats{},
+		stopChannel:   make(chan struct{}),
 	}
 
 	// add a jitter to prevent Thunder Herd during polling
@@ -52,7 +54,7 @@ func NewWatcher(mongoURI, dbName, port string) (*Watcher, error) {
 
 	watcher.JobClaimPoller(interval)
 
-	watcher.RecoverStaleJobs(30 * time.Second) // check for jobs that were failed
+	watcher.RecoverStaleJobs(10 * time.Second) // check for jobs that were failed
 	//  because the watcher crashed or died before it could rollback.
 
 	return watcher, nil
@@ -150,14 +152,14 @@ func (watcher *Watcher) HandleJobClaim() {
 		job.ClaimedAt = &now
 		job.Status = "claimed"
 
-		watcher.addJobToQueue(&job)
+		watcher.addJobToExchange(&job)
 		claimedCount++
 	}
 }
 
-// pushed job in the queue
-// updated status from claimed to queued
-func (watcher *Watcher) addJobToQueue(job *gateway.Job) {
+// watcher will add job to the exchange
+
+func (watcher *Watcher) addJobToExchange(job *gateway.Job) {
 	ctx := context.Background()
 	collection := watcher.db.Collection("jobs")
 
@@ -169,42 +171,47 @@ func (watcher *Watcher) addJobToQueue(job *gateway.Job) {
 
 	body, _ := json.Marshal(payload)
 
-	resp, err := http.Post(
-		"http://localhost:6000/queue/push",
-		"application/json",
-		bytes.NewReader(body),
-	)
+	// Round-robin selection of exchange
+	exchangePort := watcher.selectExchange()
+	exchangeURL := fmt.Sprintf("http://localhost:%s/exchange/route", exchangePort)
+
+	resp, err := http.Post(exchangeURL, "application/json", bytes.NewReader(body))
 
 	if err != nil || (resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated) {
-		log.Printf("Watcher:%s failed to push job %s", watcher.watcherId, job.JobId)
-
-		// if watcher died before rollback, then RecoverStaleJobs takes care of it
+		log.Printf("Watcher:%s failed to push job %s to exchange %s", watcher.watcherId, job.JobId.Hex(), exchangePort)
 
 		watcher.rollbackClaimedJobs(job, ctx, collection, now)
-
 		return
 	}
 
 	_, err = collection.UpdateOne(
 		ctx,
 		bson.M{"_id": job.JobId},
-		bson.M{"$set": bson.M{
-			"status":      "queued",
-			"queued_at":   now,
-			"updated_at":  now,
-			"retry_count": 0,
-		},
+		bson.M{
+			"$set": bson.M{
+				"status":     "queued",
+				"queued_at":  now,
+				"updated_at": now,
+			},
 			"$unset": bson.M{
 				"retry_after": "",
-			}},
+			},
+		},
 	)
 
 	if err != nil {
-		log.Printf("Watcher:%s Error updating job %s to queued: %v", watcher.watcherId, job.JobId, err)
+		log.Printf("Watcher:%s Error updating job %s to queued: %v",
+			watcher.watcherId, job.JobId.Hex(), err)
 	} else {
-		log.Printf("Watcher:%s queued Job %s", watcher.watcherId, job.JobId)
+		log.Printf("Watcher:%s queued Job %s via exchange %s",
+			watcher.watcherId, job.JobId.Hex(), exchangePort)
 		watcher.stats.IncrementQueuedJobCount()
 	}
+}
+
+func (watcher *Watcher) selectExchange() string {
+	watcher.exchangeIndex = (watcher.exchangeIndex + 1) % len(watcher.exchangePorts)
+	return watcher.exchangePorts[watcher.exchangeIndex]
 }
 
 func (watcher *Watcher) HandleStats(w http.ResponseWriter, r *http.Request) {
@@ -280,8 +287,8 @@ func (watcher *Watcher) handleStaleJobRecovery() {
 	ctx := context.Background()
 	collection := watcher.db.Collection("jobs")
 
-	// get jobs claimed more than 30 seconds but not queued
-	staleThreshold := time.Now().Add(-30 * time.Second)
+	// get jobs claimed more than 10 seconds but not queued
+	staleThreshold := time.Now().Add(-10 * time.Second)
 
 	filter := bson.M{
 		"status":     "claimed",
