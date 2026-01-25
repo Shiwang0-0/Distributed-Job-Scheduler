@@ -57,6 +57,10 @@ func NewWatcher(mongoURI, dbName, port string, exchangePorts []string) (*Watcher
 	watcher.RecoverStaleJobs(10 * time.Second) // check for jobs that were failed
 	//  because the watcher crashed or died before it could rollback.
 
+	watcher.RecoverStaleQueuedJobs(30 * time.Second)
+	// check for jobs that were queued but the waiting time (queuedAt - RunAt) has exceeded
+	// because of starvation or queued failure
+
 	return watcher, nil
 
 }
@@ -307,5 +311,119 @@ func (watcher *Watcher) handleStaleJobRecovery() {
 		log.Printf("Watcher:%s Error recovering stale jobs: %v", watcher.watcherId, err)
 	} else if result.ModifiedCount > 0 {
 		log.Printf("Watcher:%s Recovered %d stale jobs", watcher.watcherId, result.ModifiedCount)
+	}
+}
+
+func (watcher *Watcher) RecoverStaleQueuedJobs(interval time.Duration) {
+	watcher.wg.Add(1)
+	go func() {
+		defer watcher.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				watcher.handleStaleQueuedJobRecovery()
+			case <-watcher.stopChannel:
+				return
+			}
+		}
+	}()
+}
+
+func (watcher *Watcher) handleStaleQueuedJobRecovery() {
+	ctx := context.Background()
+	collection := watcher.db.Collection("jobs")
+
+	// jobs queued more than 60 seconds are considered stale
+	queueTimeout := 60 * time.Second
+	staleThreshold := time.Now().Add(-queueTimeout)
+
+	filter := bson.M{
+		"status":    "queued",
+		"queued_at": bson.M{"$lt": staleThreshold},
+	}
+
+	cursor, err := collection.Find(ctx, filter)
+	if err != nil {
+		log.Printf("Watcher:%s Error finding stale queued jobs: %v", watcher.watcherId, err)
+		return
+	}
+	defer cursor.Close(ctx)
+
+	recoveredCount := 0
+	for cursor.Next(ctx) {
+		var job gateway.Job
+		if err := cursor.Decode(&job); err != nil {
+			log.Printf("Watcher:%s Error decoding stale queued job: %v", watcher.watcherId, err)
+			continue
+		}
+
+		// if job is currently being executed
+		// possible by the time this cursor moves, the job was sent to execution
+		executionsCollection := watcher.db.Collection("job_executions")
+		executionFilter := bson.M{
+			"job_id": job.JobId,
+			"status": "running",
+		}
+
+		var execution gateway.JobExecution
+		execErr := executionsCollection.FindOne(ctx, executionFilter).Decode(&execution)
+
+		// if execution found and is recent, skip this job
+		if execErr == nil && time.Since(execution.StartedAt) < 30*time.Second {
+			continue
+		}
+
+		// job is stuck in queue, recover it
+		now := time.Now()
+
+		// exponential backoff
+		retryCount := job.RetryCount + 1
+		backoffSeconds := 1 << uint(retryCount) // 2^retryCount
+		if backoffSeconds > 300 {
+			backoffSeconds = 300
+		}
+		retryAfter := now.Add(time.Duration(backoffSeconds) * time.Second)
+
+		update := bson.M{
+			"$set": bson.M{
+				"status":      "pending",
+				"claimed_by":  nil,
+				"claimed_at":  nil,
+				"queued_at":   nil,
+				"retry_after": retryAfter,
+				"updated_at":  now,
+			},
+			"$inc": bson.M{
+				"retry_count": 1,
+			},
+		}
+
+		_, updateErr := collection.UpdateOne(ctx, bson.M{"_id": job.JobId}, update)
+		if updateErr != nil {
+			log.Printf("Watcher:%s Error recovering stale queued job %s: %v",
+				watcher.watcherId, job.JobId.Hex(), updateErr)
+		} else {
+			recoveredCount++
+
+			var queuedDuration time.Duration
+			if !job.QueuedAt.IsZero() {
+				queuedDuration = time.Since(job.QueuedAt)
+			}
+
+			log.Printf("Watcher:%s Recovered stale queued job %s (queued for %v), retry %d after %s",
+				watcher.watcherId,
+				job.JobId.Hex(),
+				queuedDuration,
+				retryCount)
+		}
+	}
+
+	if recoveredCount > 0 {
+		log.Printf("Watcher:%s Recovered %d stale queued jobs (queued > %v ago)",
+			watcher.watcherId, recoveredCount, queueTimeout)
+		watcher.stats.IncrementStaleQueuedRecovered(recoveredCount)
 	}
 }

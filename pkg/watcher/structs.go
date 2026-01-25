@@ -20,9 +20,10 @@ type Watcher struct {
 }
 
 type WatcherStats struct {
-	mu               sync.RWMutex
-	JobsQueuedCount  int
-	JobsClaimedCount int
-	LastClaimedTime  time.Time // when picked from db
-	LastQueuedTime   time.Time // when pushed to queue
+	mu                   sync.RWMutex
+	JobsQueuedCount      int
+	JobsClaimedCount     int
+	StaleQueuedRecovered int
+	LastClaimedTime      time.Time // when picked from db
+	LastQueuedTime       time.Time // when pushed to queue
 }

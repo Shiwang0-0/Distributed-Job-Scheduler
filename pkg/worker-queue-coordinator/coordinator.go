@@ -54,6 +54,9 @@ func NewCoordinator(mongoURI, dbName, port string, queuePorts []string) (*Coordi
 	// Start background tasks
 	coordinator.startStaleWorkerRecovery()
 
+	// monitor queue coordination (less queues, failed queues)
+	coordinator.monitorQueueCoverage()
+
 	log.Printf("Coordinator:%s Started managing %d queues", coordinatorID, len(queuePorts))
 
 	return coordinator, nil
@@ -296,4 +299,67 @@ func (c *Coordinator) HandleReleaseAssignment(w http.ResponseWriter, r *http.Req
 
 	log.Printf("Coordinator:%s Released worker %s assignment", c.coordinatorID, req.WorkerID)
 	w.WriteHeader(http.StatusOK)
+}
+
+func (c *Coordinator) monitorQueueCoverage() {
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				c.checkQueueCoverage()
+			case <-c.stopChan:
+				return
+			}
+		}
+	}()
+}
+
+// Warning for Less Queues than Workers
+
+func (c *Coordinator) checkQueueCoverage() {
+	ctx := context.Background()
+	collection := c.db.Collection("worker_assignments")
+
+	queueLoadMap := make(map[string]int)
+	for _, queuePort := range c.allQueuePorts {
+		queueLoadMap[queuePort] = 0
+	}
+
+	cursor, err := collection.Find(ctx, bson.M{"status": "active"})
+	if err != nil {
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var assignments []WorkerAssignment
+	cursor.All(ctx, &assignments)
+
+	for _, assignment := range assignments {
+		if time.Now().Before(assignment.LeaseExpiresAt) {
+			queueLoadMap[assignment.QueuePort]++
+		}
+	}
+
+	var uncoveredQueues []string
+	for _, queuePort := range c.allQueuePorts {
+		if queueLoadMap[queuePort] == 0 {
+			uncoveredQueues = append(uncoveredQueues, queuePort)
+		}
+	}
+
+	if len(uncoveredQueues) > 0 {
+		log.Printf("Coordinator:%s WARNING: %d queues have NO workers: %v",
+			c.coordinatorID, len(uncoveredQueues), uncoveredQueues)
+
+		log.Printf("Coordinator:%s Recommendation: Add at least %d more workers",
+			c.coordinatorID, len(uncoveredQueues))
+	} else {
+		log.Printf("Coordinator:%s All %d queues have worker coverage",
+			c.coordinatorID, len(c.allQueuePorts))
+	}
 }

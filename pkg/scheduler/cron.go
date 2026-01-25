@@ -183,7 +183,6 @@ func (s *Scheduler) executeCronJob(ctx context.Context, cronJob gateway.Job) {
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		ScheduledAt: now,
-		QueuedAt:    now,
 		Status:      "pending", // Watcher will claim this
 		RetryCount:  0,
 	}
