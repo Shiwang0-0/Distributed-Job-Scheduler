@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
+	"distributed-job-scheduler/pkg/shutdown"
 	"distributed-job-scheduler/pkg/worker"
-	"fmt"
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -13,33 +15,45 @@ import (
 func main() {
 	_ = godotenv.Load(".env") // with respect to pwd
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "7001"
-	}
+	port := flag.String("port", "3000", "Coordinator port")
+	mongoURI := flag.String("mongo-uri", getEnv("MONGO_URI", "mongodb://localhost:27017"), "MongoDB URI")
+	dbName := flag.String("db", getEnv("MONGO_DB", "job_scheduler"), "MongoDB database name")
+	coordinatorPort := flag.String("coordinator", "3000", "Coordinator port")
+	concurrency := flag.Int("concurrency", 5, "Worker concurrency")
 
-	mongoURI := os.Getenv("MONGO_URI")
-	if mongoURI == "" {
-		mongoURI = "mongodb://localhost:27017"
-	}
+	flag.Parse()
 
-	dbName := os.Getenv("MONGO_DB")
-	if dbName == "" {
-		dbName = "job_scheduler"
-	}
-
-	concurrency := 5
-	if c := os.Getenv("CONCURRENCY"); c != "" {
-		fmt.Sscanf(c, "%d", &concurrency)
-	}
-
-	worker, err := worker.NewWorker(mongoURI, dbName, port, concurrency)
+	w, err := worker.NewWorker(*mongoURI, *dbName, *port, *coordinatorPort, *concurrency)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	http.HandleFunc("/stats", worker.HandleStats)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stats", w.HandleStats)
 
-	log.Println("Worker running on port", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	server := &http.Server{Addr: ":" + *port, Handler: mux}
+
+	go func() {
+		log.Printf("Worker running on port %s", *port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Worker server failed: %v", err)
+		}
+	}()
+
+	// shutdown
+	shutdown.Listen(func(ctx context.Context) {
+		log.Println("Shutting down worker...")
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
+		}
+		w.Shutdown()
+		log.Println("Worker stopped gracefully")
+	})
+}
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

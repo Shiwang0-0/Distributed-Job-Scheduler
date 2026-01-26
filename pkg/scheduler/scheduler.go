@@ -44,7 +44,6 @@ func NewScheduler(mongoURI, dbName, port string) (*Scheduler, error) {
 		db:         db,
 		port:       port,
 		instanceId: fmt.Sprintf("scheduler-instance-%s", port),
-		cronJobs:   make(map[string]*cron.CronSchedule),
 		stopChan:   make(chan struct{}),
 		isLeader:   false,
 	}
@@ -151,10 +150,6 @@ func (s *Scheduler) HandleSchedule(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Scheduler:%s wrote to DB: %s (status: pending)", s.port, job.JobId)
 
 	if job.Type == gateway.JobTypeCron && s.IsLeader() {
-		schedule, _ := cron.ParseCronExpr(job.CronExpr)
-		s.cronMutex.Lock()
-		s.cronJobs[job.JobId.Hex()] = schedule
-		s.cronMutex.Unlock()
 		log.Printf("Scheduler:%s Loaded cron job %s into memory", s.port, job.JobId.Hex())
 	}
 

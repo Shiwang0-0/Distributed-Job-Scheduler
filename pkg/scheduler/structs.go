@@ -1,7 +1,6 @@
 package scheduler
 
 import (
-	"distributed-job-scheduler/pkg/cron"
 	"sync"
 	"time"
 
@@ -13,7 +12,6 @@ type Scheduler struct {
 	db         *mongo.Database
 	port       string
 	instanceId string
-	cronJobs   map[string]*cron.CronSchedule
 	cronMutex  sync.RWMutex
 	stopChan   chan struct{}
 	wg         sync.WaitGroup // 1, to ensure that only one scheduler instance does the job

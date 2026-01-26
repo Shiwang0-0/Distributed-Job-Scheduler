@@ -1,6 +1,12 @@
 package watcher
 
-import "time"
+import (
+	"distributed-job-scheduler/pkg/gateway"
+	"encoding/json"
+	"fmt"
+	"log"
+	"time"
+)
 
 func (ws *WatcherStats) IncrementClaimedJobCount() {
 	ws.mu.Lock()
@@ -32,4 +38,24 @@ func (ws *WatcherStats) GetStats() map[string]interface{} {
 		"stale_queued_recovered": ws.StaleQueuedRecovered,
 		"last_queued_time":       ws.LastQueuedTime,
 	}
+}
+
+func (w *Watcher) Shutdown() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.running {
+		return
+	}
+	log.Println("Stopping Watcher background tasks...")
+	w.running = false
+}
+
+func PrettyPrintJob(job gateway.Job) {
+	b, err := json.MarshalIndent(job, "", "  ")
+	if err != nil {
+		fmt.Printf("Job: %+v\n", job) // fallback
+		return
+	}
+	fmt.Println("Job to be claimed:")
+	fmt.Println(string(b))
 }

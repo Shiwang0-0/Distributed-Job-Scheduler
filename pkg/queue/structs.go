@@ -25,6 +25,8 @@ type QueueService struct {
 	stopChan chan struct{}
 	wg       sync.WaitGroup
 	stats    *QueueStats
+	mu       sync.Mutex
+	running  bool
 }
 
 type QueueStats struct {

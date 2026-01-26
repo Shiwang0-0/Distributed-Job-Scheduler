@@ -41,6 +41,7 @@ func NewWatcher(mongoURI, dbName, port string, exchangePorts []string) (*Watcher
 		port:          port,
 		watcherId:     watcherID,
 		exchangePorts: exchangePorts,
+		running:       true,
 		stats:         &WatcherStats{},
 		stopChannel:   make(chan struct{}),
 	}
@@ -149,7 +150,7 @@ func (watcher *Watcher) HandleJobClaim() {
 			break
 		}
 
-		fmt.Printf("Job to be claimed: %+v\n", job)
+		PrettyPrintJob(job)
 		watcher.stats.IncrementClaimedJobCount()
 
 		job.ClaimedBy = watcher.watcherId
@@ -413,7 +414,7 @@ func (watcher *Watcher) handleStaleQueuedJobRecovery() {
 				queuedDuration = time.Since(job.QueuedAt)
 			}
 
-			log.Printf("Watcher:%s Recovered stale queued job %s (queued for %v), retry %d after %s",
+			log.Printf("Watcher:%s Recovered stale queued job %s (queued for %v), retry %d",
 				watcher.watcherId,
 				job.JobId.Hex(),
 				queuedDuration,

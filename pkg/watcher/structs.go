@@ -16,6 +16,8 @@ type Watcher struct {
 	exchangePorts []string
 	wg            sync.WaitGroup
 	exchangeIndex int
+	mu            sync.Mutex
+	running       bool
 	stopChannel   chan struct{}
 }
 

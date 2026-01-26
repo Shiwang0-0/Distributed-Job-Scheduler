@@ -12,6 +12,7 @@ func NewQueueService(queueID, port string) *QueueService {
 		queue:   NewQueue(),
 		queueID: queueID,
 		port:    port,
+		running: true,
 		stats:   &QueueStats{},
 	}
 }
@@ -124,4 +125,15 @@ func (qs *QueueService) HandleGetAll(w http.ResponseWriter, r *http.Request) {
 func (qs *QueueService) HandleStats(w http.ResponseWriter, r *http.Request) {
 	stats := qs.stats.Get()
 	json.NewEncoder(w).Encode(stats)
+}
+
+func (q *QueueService) Shutdown() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if !q.running {
+		return
+	}
+	log.Printf("Stopping Queue %s...", q.queueID)
+	q.running = false
+	log.Printf("Queue %s stopped.", q.queueID)
 }

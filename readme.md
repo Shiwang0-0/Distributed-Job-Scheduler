@@ -1,17 +1,35 @@
 ### commands to run
-- open terminal in the root folder run `PORT=8081 go run cmd/scheduler/main.go`  
-- similary for PORT=8082 and 8083 in other terminals  
-- start the API gateway run `go run cmd/gateway/main.go`  
-- start the Watcher by running `PORT=9001 go run cmd/watcher/main.go`
-- start the Queue Service by running `go run cmd/queue_service/main.go`
-- start the Worker by running `PORT=7001 CONCURRENCY=5 go run cmd/worker/main.go`
 
-- send a request to APIGateway run  
+##### using tmux
+in the root folder type `bash start_tmux.sh`
+
+
+##### manual
+- open terminal in the root folder run `go run cmd/scheduler/main.go --port=8081`  
+- similary for PORT=8082 and 8083 in other terminals  
+- start the API gateway by running `go run cmd/gateway/main.go --port=8000 --schedulers=8081,8082,8083`  
+- start the Exchange by running `go run cmd/exchange/main.go --port=2001 --normal=7001 --high=7101`
+
+- start the Watcher by running `go run cmd/watcher/main.go --port=9001 --exchanges=2001,2002`
+- start the Queue Service by running 
+    - `go run cmd/queue_service/main.go --port=7001 --type=normal --index=0`
+    - `go run cmd/queue_service/main.go --port=7101 --type=high   --index=0`
+- start the Coordinator by running `go run cmd/coordinator/main.go --port=3000 --normal=7001 --high=7101`
+- start the Worker by running `go run cmd/worker/main.go --port=10001 --coordinator=3000 --concurrency=5`
+
+#### API Gateway
+
+The API Gateway is the external entry point for clients.
+It load-balances requests across multiple schedulers.
+
+- create job (once / cron)
     ```
         curl -X POST http://localhost:8080/api/jobs \
         -H "Content-Type: application/json" \
         -d '{
-            "payload": "test job"
+            "type": "once",
+            "payload": "high priority one time",
+            "priority":"normal"
         }'
     ```
 
@@ -41,26 +59,145 @@
             "priority":"high"
         }'
     ```
+- get all jobs
+    ```
+    curl "http://localhost:8000/jobs"
+    ```
+- get jobs by status
+    ```
+    curl "http://localhost:8000/jobs?status=pending"
+    ```
+- get job by id
+    ```
+    curl "http://localhost:8000/job?job_id=69541618f7d4e1295bfa447b"
+    ```
+---
+
+### Scheduler
+Schedulers persist jobs, handle cron expansion, and participate in leader election.
+Only the leader schedules cron jobs.
+- scheduler health check
+    ```
+    curl "http://localhost:8081/health"
+    ```
+- schedule job (direct scheduler call, usually via gateway)
+    ```
+    curl -X POST "http://localhost:8081/schedule" \
+         -H "Content-Type: application/json" \
+         -d '{
+              "type": "cron",
+              "cron_expr": "*/1 *",
+              "payload": "run every minute"
+         }'
+    ```
+- get all jobs from scheduler
+    ```
+    curl "http://localhost:8081/jobs"
+    ```
+- get jobs by status
+    ```
+    curl "http://localhost:8081/jobs?status=active"
+    ```
+- get job by id
+    ```
+    curl "http://localhost:8081/job?job_id=69541618f7d4e1295bfa447b"
+    ```
+---
+
+#### Coordinator (Worker–Queue Assignment)
+The coordinator manages worker-to-queue assignments and liveness.
+- request queue assignment (worker → coordinator)
+    ```
+    curl -X POST "http://localhost:3000/coordinator/request-assignment"
+    ```
+- worker heartbeat
+    ```
+    curl -X POST "http://localhost:3000/coordinator/heartbeat"
+    ```
+- release assignment (worker shutdown / rebalance)
+    ```
+    curl -X POST "http://localhost:3000/coordinator/release-assignment"
+    ```
+- coordinator stats
+    ```
+    curl "http://localhost:3000/coordinator/stats"
+    ```
+---
+
+#### Exchange
+Exchanges route jobs to appropriate queues (normal / high priority).
+- exchange stats
+    ```
+    curl "http://localhost:2001/exchange/stats"
+    ```
 
 - get jobs  (gateway takes this request)
     ```  
-        curl "http://localhost:8080/jobs"   
-        curl "http://localhost:8080/jobs?status=pending"  
-        curl "http://localhost:8080/job?job_id=69541618f7d4e1295bfa447b"  
+        curl "http://localhost:PORT/jobs"   
+        curl "http://localhost:PORT/jobs?status=pending"  
+        curl "http://localhost:PORT/job?job_id=69541618f7d4e1295bfa447b"  
     ```
 - get watcher stats
     ```
-        curl "http://localhost:9001/stats"
+        curl "http://localhost:PORT/stats"
     ```
-- queue 
+---
+
+#### Queue Service (Normal & High Priority)
+Queues store jobs temporarily and provide leasing semantics.
+- push job into queue
     ```
-        curl "http://localhost:6000/queue"
-        curl "http://localhost:6000/stats"
+    curl -X POST "http://localhost:7001/queue/push" \
+         -H "Content-Type: application/json" \
+         -d '{ ...job payload... }'
     ```
-- worker
+- lease a job (worker pulls job)
     ```
-        curl "http://localhost:7001/stats"
+    curl -X POST "http://localhost:7001/queue/lease"
     ```
+- release lease (job failed / retry)
+    ```
+    curl -X POST "http://localhost:7001/queue/release-lease"
+    ```
+- delete job (job completed)
+    ```
+    curl -X POST "http://localhost:7001/queue/delete"
+    ```
+- peek queue (non-destructive)
+    ```
+    curl "http://localhost:7001/queue/peek"
+    ```
+- list all jobs in queue (debug)
+    ```
+    curl "http://localhost:7001/queue/all"
+    ```
+- queue stats
+    ```
+    curl "http://localhost:7001/queue/stats"
+    ```
+(Repeat on all queue ports)
+
+---
+
+#### Watcher (DB → Exchange Bridge)
+Watchers poll MongoDB for pending jobs and push them into exchanges.
+- watcher stats
+    ```
+    curl "http://localhost:9001/watcher/stats"
+    ```
+---
+
+
+### Worker (Job Executor)
+Workers pull jobs from queues and execute them.
+- worker stats
+    ```
+    curl "http://localhost:10001/worker/stats"
+    ```
+---
+
+### Architecture
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        CLIENT                                │
@@ -214,7 +351,7 @@
         ↓
     Losers see "already claimed" and move on
 
-
+--------------------------------------------------------------------------------------------------
 
     Worker claims job with a LEASE (timeout)
         ↓
@@ -232,6 +369,7 @@
         └─ write job failed (Dead) in DB 
 
 ```
+---
 
 ### Why this Architecture ? (clarifications and tradeoffs)
 

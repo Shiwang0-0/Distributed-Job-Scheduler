@@ -1,29 +1,61 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"log"
 	"net/http"
+	"strings"
 
 	"distributed-job-scheduler/pkg/gateway"
 	"distributed-job-scheduler/pkg/loadbalancer"
+	"distributed-job-scheduler/pkg/shutdown"
 )
 
 func main() {
-	serviceURLs := []string{
-		"http://localhost:8081",
-		"http://localhost:8082",
-		"http://localhost:8083",
+	port := flag.String("port", "8000", "Gateway port")
+
+	schedulerPorts := flag.String(
+		"schedulers",
+		"",
+		"Comma-separated scheduler ports (e.g. 8081,8082,8083)",
+	)
+
+	flag.Parse()
+
+	if *schedulerPorts == "" {
+		log.Fatal("No schedulers provided. Use --schedulers")
 	}
+
+	// Scheduler URLs
+	var serviceURLs []string
+	for _, p := range strings.Split(*schedulerPorts, ",") {
+		serviceURLs = append(serviceURLs, "http://localhost:"+p)
+	}
+
+	log.Printf("Gateway running on port %s", *port)
+	log.Printf("Schedulers registered: %v", serviceURLs)
 
 	lb := loadbalancer.NewLoadBalancer(serviceURLs)
 	apiGateway := gateway.NewAPIGateway(lb)
 
-	http.HandleFunc("/api/jobs", apiGateway.HandleCreateJob)
-	http.HandleFunc("/jobs", apiGateway.HandleGetJobs)
-	http.HandleFunc("/job", apiGateway.HandleGetJobById)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/jobs", apiGateway.HandleCreateJob)
+	mux.HandleFunc("/jobs", apiGateway.HandleGetJobs)
+	mux.HandleFunc("/job", apiGateway.HandleGetJobById)
 
-	port := ":8080"
-	log.Println("API Gateway running on", port)
+	server := &http.Server{Addr: ":" + *port, Handler: mux}
 
-	log.Fatal(http.ListenAndServe(port, nil))
+	go func() {
+		log.Printf("Gateway running on port %s", *port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Gateway failed: %v", err)
+		}
+	}()
+
+	shutdown.Listen(func(ctx context.Context) {
+		log.Println("Shutting down Gateway...")
+		server.Shutdown(ctx)
+		log.Println("Gateway stopped gracefully")
+	})
 }

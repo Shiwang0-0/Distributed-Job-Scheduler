@@ -38,16 +38,6 @@ func (s *Scheduler) CronJobLoader(ctx context.Context) error {
 			continue
 		}
 
-		schedule, err := cron.ParseCronExpr(job.CronExpr)
-		if err != nil {
-			log.Printf("Scheduler:%s Failed to parse cron job %s: %v", s.port, job.JobId.Hex(), err)
-			continue
-		}
-
-		s.cronMutex.Lock()
-		s.cronJobs[job.JobId.Hex()] = schedule
-		s.cronMutex.Unlock()
-
 		count++
 		log.Printf("Scheduler:%s Loaded cron job %s [%s]", s.port, job.JobId.Hex(), job.CronExpr)
 	}
@@ -60,7 +50,7 @@ func (s *Scheduler) CronJobLoader(ctx context.Context) error {
 func (s *Scheduler) CronTicker() {
 	defer s.wg.Done()
 
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	log.Printf("Scheduler:%s Cron ticker started (LEADER)", s.port)
@@ -86,45 +76,35 @@ func (s *Scheduler) checkCronJobs() {
 	ctx := context.Background()
 	now := time.Now().Truncate(time.Minute)
 
-	s.cronMutex.RLock()
-	jobIDs := make([]string, 0, len(s.cronJobs))
-	for jobID := range s.cronJobs {
-		jobIDs = append(jobIDs, jobID)
+	filter := bson.M{
+		"type":   gateway.JobTypeCron,
+		"status": "active",
+		"$or": []bson.M{
+			{"next_run_at": bson.M{"$lte": now}},
+			{"next_run_at": bson.M{"$exists": false}},
+		},
 	}
-	s.cronMutex.RUnlock()
 
-	for _, jobIDStr := range jobIDs {
-		jobID, err := primitive.ObjectIDFromHex(jobIDStr)
-		if err != nil {
-			continue
-		}
+	cursor, err := s.db.Collection("jobs").Find(ctx, filter)
+	if err != nil {
+		log.Printf("Scheduler:%s Failed to query cron jobs: %v", s.port, err)
+		return
+	}
+	defer cursor.Close(ctx)
 
-		// Use FindOneAndUpdate to JobTypeCron atomically check and update next_run_at
-		// This prevents multiple scheduler instances from creating duplicate jobs
-		filter := bson.M{
-			"_id":    jobID,
-			"type":   gateway.JobTypeCron,
-			"status": "active",
-			"$or": []bson.M{
-				{"next_run_at": bson.M{"$lte": now}},
-				{"next_run_at": bson.M{"$exists": false}},
-			},
-		}
-
+	for cursor.Next(ctx) {
 		var cronJob gateway.Job
-		err = s.db.Collection("jobs").FindOne(ctx, filter).Decode(&cronJob)
-
-		if err != nil {
-			if err == mongo.ErrNoDocuments {
-				// Job was deleted or already processed
-				continue
-			}
-			log.Printf("Scheduler:%s Failed to fetch cron job %s: %v", s.port, jobIDStr, err)
+		if err := cursor.Decode(&cronJob); err != nil {
+			log.Printf("Scheduler:%s Failed to decode cron job: %v", s.port, err)
 			continue
 		}
 
 		// Execute and update atomically
 		s.executeCronJob(ctx, cronJob)
+	}
+
+	if err := cursor.Err(); err != nil {
+		log.Printf("Scheduler:%s Cursor error while checking cron jobs: %v", s.port, err)
 	}
 }
 
@@ -132,12 +112,15 @@ func (s *Scheduler) checkCronJobs() {
 func (s *Scheduler) executeCronJob(ctx context.Context, cronJob gateway.Job) {
 	now := time.Now()
 
-	// Get schedule from memory
-	s.cronMutex.RLock()
-	schedule, exists := s.cronJobs[cronJob.JobId.Hex()]
-	s.cronMutex.RUnlock()
+	if cronJob.CronExpr == "" {
+		log.Printf("Scheduler:%s Cron job %s has empty cron expression", s.port, cronJob.JobId.Hex())
+		return
+	}
 
-	if !exists {
+	schedule, err := cron.ParseCronExpr(cronJob.CronExpr)
+	if err != nil {
+		log.Printf("Scheduler:%s Failed to parse cron expression for job %s (%s): %v",
+			s.port, cronJob.JobId.Hex(), cronJob.CronExpr, err)
 		return
 	}
 
@@ -153,13 +136,20 @@ func (s *Scheduler) executeCronJob(ctx context.Context, cronJob gateway.Job) {
 		},
 	}
 
+	// Optimistic locking: only update if next_run_at hasn't changed
+	filter := bson.M{
+		"_id":  cronJob.JobId,
+		"type": gateway.JobTypeCron,
+	}
+
+	// Only lock on next_run_at if it's set (not first run)
+	if !cronJob.NextRunAt.IsZero() {
+		filter["next_run_at"] = cronJob.NextRunAt
+	}
+
 	result := s.db.Collection("jobs").FindOneAndUpdate(
 		ctx,
-		bson.M{
-			"_id":         cronJob.JobId,
-			"type":        gateway.JobTypeCron,
-			"next_run_at": cronJob.NextRunAt, // Optimistic locking
-		},
+		filter,
 		update,
 		options.FindOneAndUpdate().SetReturnDocument(options.After),
 	)

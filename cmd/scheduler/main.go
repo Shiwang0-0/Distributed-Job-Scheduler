@@ -3,34 +3,25 @@ package main
 import (
 	"context"
 	"distributed-job-scheduler/pkg/scheduler"
+	"distributed-job-scheduler/pkg/shutdown"
+	"flag"
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/joho/godotenv"
 )
 
 func main() {
-	_ = godotenv.Load(".env") // with respect to pwd
+	_ = godotenv.Load(".env")
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8081"
-	}
+	port := flag.String("port", "3000", "Coordinator port")
+	mongoURI := flag.String("mongo-uri", getEnv("MONGO_URI", "mongodb://localhost:27017"), "MongoDB URI")
+	dbName := flag.String("db", getEnv("MONGO_DB", "job_scheduler"), "MongoDB database name")
 
-	mongoURI := os.Getenv("MONGO_URI")
-	if mongoURI == "" {
-		mongoURI = "mongodb://localhost:27017"
-	}
+	flag.Parse()
 
-	dbName := os.Getenv("MONGO_DB")
-	if dbName == "" {
-		dbName = "job_scheduler"
-	}
-
-	scheduler, err := scheduler.NewScheduler(mongoURI, dbName, port)
+	scheduler, err := scheduler.NewScheduler(*mongoURI, *dbName, *port)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -41,37 +32,32 @@ func main() {
 	// Start leader election process
 	scheduler.StartLeaderElection(ctx)
 
-	http.HandleFunc("/health", scheduler.HandleHealth)
-	http.HandleFunc("/schedule", scheduler.HandleSchedule)
-	http.HandleFunc("/jobs", scheduler.HandleGetJobs)
-	http.HandleFunc("/job", scheduler.HandleGetJobById)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", scheduler.HandleHealth)
+	mux.HandleFunc("/schedule", scheduler.HandleSchedule)
+	mux.HandleFunc("/jobs", scheduler.HandleGetJobs)
+	mux.HandleFunc("/job", scheduler.HandleGetJobById)
 
-	server := &http.Server{
-		Addr: ":" + port,
-	}
+	server := &http.Server{Addr: ":" + *port, Handler: mux}
 
 	go func() {
-		log.Printf("Scheduler running on port %s", port)
+		log.Printf("Scheduler running on port %s", *port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
+			log.Fatalf("Scheduler failed: %v", err)
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	shutdown.Listen(func(ctx context.Context) {
+		log.Println("Shutting down Scheduler...")
+		server.Shutdown(ctx)
+		scheduler.Shutdown(ctx)
+		log.Println("Scheduler stopped gracefully")
+	})
+}
 
-	log.Println("Shutting down server...")
-
-	// Shutdown scheduler (releases lease, stops goroutines)
-	if err := scheduler.Shutdown(ctx); err != nil {
-		log.Printf("Scheduler shutdown error: %v", err)
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-
-	// Shutdown HTTP server
-	if err := scheduler.Shutdown(ctx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
-	}
-
-	log.Println("Server stopped")
+	return fallback
 }
