@@ -1,6 +1,7 @@
 package worker
 
 import (
+	jobregistry "distributed-job-scheduler/pkg/job-registry"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ type Worker struct {
 	stats             *WorkerStats
 	concurrency       int
 	semaphore         chan struct{}
+	jobRegistry       *jobregistry.JobRegistry
 }
 
 type WorkerStats struct {

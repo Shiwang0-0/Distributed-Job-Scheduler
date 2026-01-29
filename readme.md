@@ -17,6 +17,21 @@ in the root folder type `bash start_tmux.sh`
 - start the Coordinator by running `go run cmd/coordinator/main.go --port=3000 --normal=7001 --high=7101`
 - start the Worker by running `go run cmd/worker/main.go --port=10001 --coordinator=3000 --concurrency=5`
 
+Create a .env file in the root folder
+```
+MONGO_URI = Your MongoDB URI
+MONGO_DB = Distributed-Job-Scheduler
+PORT = 8000
+
+# SMTP Configuration (for email jobs)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=username@gmail.com   
+SMTP_PASS=<generate app password from google>
+SMTP_FROM=username@gmail.com
+```
+
+
 #### API Gateway
 
 The API Gateway is the external entry point for clients.
@@ -59,6 +74,23 @@ It load-balances requests across multiple schedulers.
             "priority":"high"
         }'
     ```
+
+    ```
+        Sending an Email
+
+        curl -X POST http://localhost:8080/api/jobs \
+        -H "Content-Type: application/json" \
+        -d '{
+            "type": "once",
+            "payload": {
+                "job_type": "send_email",
+                "to": "targetEmail@gmail.com",
+                "subject": "Welcome to Our Service!",
+                "body": "Thank you for signing up. We are excited to have you!"
+            }
+        }'
+    ```
+
 - get all jobs
     ```
     curl "http://localhost:8000/jobs"

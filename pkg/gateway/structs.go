@@ -26,24 +26,24 @@ const (
 )
 
 type Job struct {
-	JobId       primitive.ObjectID `json:"job_id" bson:"_id,omitempty"` // bson needs to be _id only
-	Type        JobType            `bson:"type" json:"type"`
-	Priority    JobPriority        `json:"priority" bson:"priority"`
-	ScheduledAt time.Time          `json:"scheduled_at" bson:"scheduled_at"`
-	CreatedAt   time.Time          `json:"created_at" bson:"created_at"`
-	LastRunAt   time.Time          `json:"last_run_at" bson:"last_run_at"`
-	NextRunAt   time.Time          `json:"next_run_at" bson:"next_run_at"`
-	UpdatedAt   time.Time          `json:"updated_at" bson:"updated_at"`
-	ClaimedBy   string             `bson:"claimed_by,omitempty" json:"claimed_by,omitempty"`
-	ClaimedAt   *time.Time         `bson:"claimed_at,omitempty" json:"claimed_at,omitempty"`
-	QueuedAt    time.Time          `json:"queued_at" bson:"queued_at"`
-	Status      string             `json:"status" bson:"status"`
-	Payload     string             `json:"payload" bson:"payload"`
-	RetryCount  int                `json:"retry_count" bson:"retry_count"`
-	MaxRetries  int                `json:"max_retries" bson:"max_retries"`
-	RetryAfter  *time.Time         `json:"retry_after,omitempty" bson:"retry_after,omitempty"`
-	LockedBy    string             `json:"locked_by" bson:"locked_by"`
-	LockedUntil time.Time          `json:"locked_until" bson:"locked_until"`
+	JobId       primitive.ObjectID     `json:"job_id" bson:"_id,omitempty"` // bson needs to be _id only
+	Type        JobType                `bson:"type" json:"type"`
+	Priority    JobPriority            `json:"priority" bson:"priority"`
+	ScheduledAt time.Time              `json:"scheduled_at" bson:"scheduled_at"`
+	CreatedAt   time.Time              `json:"created_at" bson:"created_at"`
+	LastRunAt   time.Time              `json:"last_run_at" bson:"last_run_at"`
+	NextRunAt   time.Time              `json:"next_run_at" bson:"next_run_at"`
+	UpdatedAt   time.Time              `json:"updated_at" bson:"updated_at"`
+	ClaimedBy   string                 `bson:"claimed_by,omitempty" json:"claimed_by,omitempty"`
+	ClaimedAt   *time.Time             `bson:"claimed_at,omitempty" json:"claimed_at,omitempty"`
+	QueuedAt    time.Time              `json:"queued_at" bson:"queued_at"`
+	Status      string                 `json:"status" bson:"status"`
+	Payload     map[string]interface{} `json:"payload" bson:"payload"`
+	RetryCount  int                    `json:"retry_count" bson:"retry_count"`
+	MaxRetries  int                    `json:"max_retries" bson:"max_retries"`
+	RetryAfter  *time.Time             `json:"retry_after,omitempty" bson:"retry_after,omitempty"`
+	LockedBy    string                 `json:"locked_by" bson:"locked_by"`
+	LockedUntil time.Time              `json:"locked_until" bson:"locked_until"`
 
 	// cron job
 	CronExpr string `json:"cron_expr,omitempty" bson:"cron_expr,omitempty"`

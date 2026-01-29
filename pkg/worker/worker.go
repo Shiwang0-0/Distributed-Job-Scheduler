@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"distributed-job-scheduler/pkg/gateway"
+	jobregistry "distributed-job-scheduler/pkg/job-registry"
 	"distributed-job-scheduler/pkg/queue"
 	"encoding/json"
 	"fmt"
@@ -36,6 +37,8 @@ func NewWorker(mongoURI, dbName, port, coordinatorPort string, concurrency int) 
 
 	db := client.Database(dbName)
 
+	registry := jobregistry.NewJobRegistry()
+
 	worker := &Worker{
 		client:          client,
 		db:              db,
@@ -43,6 +46,7 @@ func NewWorker(mongoURI, dbName, port, coordinatorPort string, concurrency int) 
 		port:            port,
 		coordinatorPort: coordinatorPort,
 		stats:           &WorkerStats{},
+		jobRegistry:     registry,
 		stopChannel:     make(chan struct{}),
 		concurrency:     concurrency,
 		semaphore:       make(chan struct{}, concurrency),
@@ -216,7 +220,7 @@ func (worker *Worker) executeJob(job *gateway.Job) {
 
 	executionId := worker.prepareToExecute(job, startTime)
 
-	_, execErr := worker.performJobWork(job)
+	result, execErr := worker.performJobWork(job)
 	finishedAt := time.Now()
 
 	status := "success"
@@ -225,7 +229,6 @@ func (worker *Worker) executeJob(job *gateway.Job) {
 
 	if execErr != nil {
 		status = "failed"
-		worker.stats.IncrementFailureCount()
 		errorMsg = execErr.Error()
 
 		if job.RetryCount < job.MaxRetries {
@@ -250,6 +253,7 @@ func (worker *Worker) executeJob(job *gateway.Job) {
 			"finished_at":   finishedAt,
 			"status":        status,
 			"error_message": errorMsg,
+			"result":        result,
 		}},
 	)
 

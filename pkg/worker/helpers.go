@@ -15,11 +15,43 @@ import (
 )
 
 func (worker *Worker) performJobWork(job *gateway.Job) (map[string]interface{}, error) {
-	result := make(map[string]interface{})
+
+	payloadMap := job.Payload
+
+	jobType, ok := payloadMap["job_type"].(string)
+	if !ok {
+		return nil, fmt.Errorf("'job_type' field is required in payload")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// Execute using job registry
+	log.Printf("Worker:%s Executing job type: %s", worker.workerId, jobType)
+
+	result, err := worker.jobRegistry.Execute(ctx, jobType, payloadMap)
+	if err != nil {
+		return result, err
+	}
+
+	// Add worker metadata to result
+	if result == nil {
+		result = make(map[string]interface{})
+	}
+
 	result["payload"] = job.Payload
 	result["worker_id"] = worker.workerId
 	result["executed_at"] = time.Now()
 	return result, nil
+}
+
+func getJobType(payload interface{}) string {
+	if payloadMap, ok := payload.(map[string]interface{}); ok {
+		if jobType, ok := payloadMap["job_type"].(string); ok {
+			return jobType
+		}
+	}
+	return "unknown"
 }
 
 func (worker *Worker) moveToCompletedJobs(job *gateway.Job, finishedAt time.Time) {
